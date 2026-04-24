@@ -151,7 +151,7 @@ Located in [`examples/`](examples), in rough order of complexity:
 
 ## Reference
 
-Internal architecture notes (intended for contributors) live in [`src/CLAUDE.md`](src/CLAUDE.md). The authoritative AT command reference is the **ST87MXX UM AT Commands description** PDF (v3.1, 2025-10-06) from ST.
+The authoritative AT command reference is the **ST87MXX UM AT Commands description** PDF (v3.1, 2025-10-06) from ST.
 
 ## License
 
