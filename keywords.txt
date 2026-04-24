@@ -1,0 +1,72 @@
+#######################################
+# Syntax Coloring Map For iLabs ST87M01
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+ST87M01AT	KEYWORD1
+ST87M01Modem	KEYWORD1
+ST87M01Network	KEYWORD1
+ST87M01Client	KEYWORD1
+ST87M01UDP	KEYWORD1
+ST87M01NBIoT	KEYWORD1
+ST87M01RegStatus	KEYWORD1
+ST87M01CellInfo	KEYWORD1
+ST87M01SignalInfo	KEYWORD1
+ST87M01OperatorInfo	KEYWORD1
+ST87M01SocketState	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+poll	KEYWORD2
+isAlive	KEYWORD2
+setEcho	KEYWORD2
+setVerboseErrors	KEYWORD2
+setFunctionality	KEYWORD2
+getFunctionality	KEYWORD2
+getModel	KEYWORD2
+getRevision	KEYWORD2
+getImsi	KEYWORD2
+getOperator	KEYWORD2
+attach	KEYWORD2
+isAttached	KEYWORD2
+definePdpContext	KEYWORD2
+activatePdp	KEYWORD2
+getLocalAddress	KEYWORD2
+setCeregMode	KEYWORD2
+getCellInfo	KEYWORD2
+getSignal	KEYWORD2
+resolveHost	KEYWORD2
+ping	KEYWORD2
+createSocket	KEYWORD2
+connectTcp	KEYWORD2
+sendTcp	KEYWORD2
+readSocket	KEYWORD2
+closeSocket	KEYWORD2
+sendf	KEYWORD2
+expectOK	KEYWORD2
+expectPrompt	KEYWORD2
+readLine	KEYWORD2
+waitLineStartsWith	KEYWORD2
+waitFinalResult	KEYWORD2
+registerUrcHandler	KEYWORD2
+lastCmeError	KEYWORD2
+localIP	KEYWORD2
+setSleepMode	KEYWORD2
+setPSM	KEYWORD2
+getCandidateFreqs	KEYWORD2
+at	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+NotRegistered	LITERAL1
+RegisteredHome	LITERAL1
+Searching	LITERAL1
+RegistrationDenied	LITERAL1
+RegisteredRoaming	LITERAL1

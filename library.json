@@ -1,0 +1,22 @@
+{
+  "name": "iLabs ST87M01",
+  "version": "0.1.0",
+  "description": "Arduino library for the ST Microelectronics ST87M01 cellular NB-IoT / LTE-M modem. Wraps the AT command interface and exposes Arduino-style Client and UDP objects for TCP/UDP over the cellular PDP context, plus helpers for NB-IoT power saving, cell and signal info, and network bring-up.",
+  "keywords": "cellular, nb-iot, lte-m, modem, st87m01, at-commands, iot",
+  "authors": {
+    "name": "Pontus Oldberg",
+    "email": "pontus.oldberg@gmail.com",
+    "maintainer": true
+  },
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "*",
+  "headers": [
+    "ST87M01Modem.h",
+    "ST87M01Network.h",
+    "ST87M01Client.h",
+    "ST87M01UDP.h",
+    "ST87M01NBIoT.h",
+    "ST87M01Boards.h"
+  ]
+}
