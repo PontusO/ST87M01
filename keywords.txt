@@ -18,6 +18,8 @@ ST87M01CellInfo	KEYWORD1
 ST87M01SignalInfo	KEYWORD1
 ST87M01OperatorInfo	KEYWORD1
 ST87M01SocketState	KEYWORD1
+ST87M01PsmInfo	KEYWORD1
+ST87M01EdrxInfo	KEYWORD1
 
 #######################################
 # Methods and Functions (KEYWORD2)
@@ -57,8 +59,32 @@ waitFinalResult	KEYWORD2
 registerUrcHandler	KEYWORD2
 lastCmeError	KEYWORD2
 localIP	KEYWORD2
-setSleepMode	KEYWORD2
-setPSM	KEYWORD2
+requestPSM	KEYWORD2
+disablePSM	KEYWORD2
+resetPSM	KEYWORD2
+getPSM	KEYWORD2
+requestEDRX	KEYWORD2
+requestEDRXRaw	KEYWORD2
+disableEDRX	KEYWORD2
+resetEDRX	KEYWORD2
+getEDRX	KEYWORD2
+setSleep	KEYWORD2
+sleepNow	KEYWORD2
+setSleepIndications	KEYWORD2
+setWakeupEvent	KEYWORD2
+wake	KEYWORD2
+onSleep	KEYWORD2
+onWake	KEYWORD2
+onEnergy	KEYWORD2
+lastEnergyMicroWattH	KEYWORD2
+encodeTau	KEYWORD2
+encodeActiveTime	KEYWORD2
+decodeTau	KEYWORD2
+decodeActiveTime	KEYWORD2
+encodeEdrx	KEYWORD2
+decodeEdrx	KEYWORD2
+encodePtw	KEYWORD2
+decodePtw	KEYWORD2
 getCandidateFreqs	KEYWORD2
 at	KEYWORD2
 addHeader	KEYWORD2
