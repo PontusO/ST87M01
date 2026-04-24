@@ -1,54 +1,42 @@
 /*
   ST87M01 HttpGet
 
-  Attaches to the cellular network, opens a plain TCP (port 80) connection
-  to ifconfig.me, issues an HTTP/1.0 GET, and prints the entire response —
-  status line, headers, blank line, body — until the server closes the
-  connection. The response body is the modem's apparent public IP (the
-  address the carrier's CGN NAT maps us to), which is genuinely useful
-  on an IoT device and incidentally keeps the whole response comfortably
-  small (~160 bytes total).
+  Attaches to the cellular network and fetches http://ilabs.se/files/ilabs-logo.txt
+  using the modem's native AT#HTTP* command family (wrapped by the
+  ST87M01HTTP library class). Prints the status code, the server's
+  response headers, and the full body.
 
-  Why small: raw TCP receive in this library is limited by ST87M01Client's
-  1500-byte RX_BUF_SIZE combined with the modem's AT#IPREAD semantics
-  (it dumps the entire pending buffer in a single transaction, with no
-  per-read size cap). Responses larger than ~1500 bytes are silently
-  truncated. For arbitrarily-sized HTTP responses, use the modem's
-  dedicated HTTP client (AT#HTTPCFG / AT#HTTPMETHOD / AT#HTTPRECV —
-  not yet wrapped by this library) instead of raw TCP sockets.
+  Why the native HTTP client instead of raw TCP: the modem's AT#IPREAD
+  is a one-shot transaction — when it's called, the modem dumps the
+  entire pending RX buffer over the UART in one go. If the response is
+  larger than the library's local buffer, the tail is silently drained
+  and lost (see ST87M01Client::droppedBytes() / socketRxDropped()).
+  The HTTP stack, by contrast, delivers the response as discrete chunks
+  via #HTTPRECV URCs, and AT#HTTPREAD pulls exactly one chunk per call,
+  so arbitrary-sized responses work correctly.
 
-  HTTP/1.0 with "Connection: close" is used deliberately: the server
-  terminates the socket at end-of-body, so there's no need to parse
-  Content-Length or chunked transfer encoding. The #SOCKETCLOSED URC
-  makes client.connected() return false, which is the natural end-of-
-  stream signal.
-
-  Exercises the full TCP + DNS path: AT#DNS, AT#SOCKETCREATE, AT#TCPCONNECT,
-  AT#IPSENDTCP, #IPRECV URC dispatch, AT#IPREAD, #SOCKETCLOSED URC.
+  Exercises: AT#DNS, AT#SOCKETCREATE, AT#TCPCONNECT, AT#HTTPSTART,
+  AT#HTTPMETHOD, AT#HTTPSEND, #HTTPRECV URC dispatch, AT#HTTPREAD,
+  AT#HTTPSTOP, AT#SOCKETCLOSE.
 
   Hardware: any board with a ST87M01Boards.h preset. Run NetworkAttach
   first to verify the modem gets an IP address, and ConfigureDns once
-  per device so AT#DNS has a server to query (required — HOST is a
-  name, not an IP).
+  per device so AT#DNS has a server to query.
 */
 
 #include <ST87M01Modem.h>
 #include <ST87M01Network.h>
-#include <ST87M01Client.h>
+#include <ST87M01HTTP.h>
 #include <ST87M01Boards.h>
 
 static const char* APN  = "iot.1nce.net";
-static const char* HOST = "ifconfig.me";
-// /ip always returns the plain-text IP (~12 bytes body, ~160 B total)
-// regardless of User-Agent. The bare / path does User-Agent sniffing and
-// serves a 10 KB HTML homepage to anything not recognised as curl/wget,
-// which exceeds what we can cleanly receive over raw TCP on this modem.
-static const char* PATH_ = "/ip";
+static const char* HOST = "ilabs.se";
+static const char* PATH_ = "/files/ilabs-logo.txt";
 static constexpr uint16_t PORT = 80;
 
 static constexpr unsigned long REGISTRATION_TIMEOUT_MS = 120000;
-static constexpr unsigned long READ_HARD_TIMEOUT_MS    = 30000;
-static constexpr unsigned long READ_IDLE_TIMEOUT_MS    = 5000;
+static constexpr unsigned long RESPONSE_TIMEOUT_MS     = 30000;
+static constexpr unsigned long READ_IDLE_TIMEOUT_MS    = 10000;
 
 // Set to true to tee every AT command and modem response to Serial.
 // Noisy — only useful when debugging the AT path.
@@ -56,7 +44,7 @@ static constexpr bool AT_DEBUG = false;
 
 ST87M01Modem   modem(ST87M01_SERIAL, ST87M01_DEFAULT_PINS);
 ST87M01Network network(modem);
-ST87M01Client  client(modem);
+ST87M01HTTP    http(modem);
 
 static const char* regStatusStr(ST87M01RegStatus r) {
   switch (r) {
@@ -131,74 +119,75 @@ void setup() {
   Serial.print(F("  IP="));
   Serial.println(network.localIP());
 
-  Serial.print(F("Connecting to "));
+  Serial.print(F("Opening HTTP session to "));
   Serial.print(HOST);
   Serial.print(':');
   Serial.println(PORT);
 
-  if (!client.connect(HOST, PORT)) {
-    Serial.print(F("connect() failed — CME "));
+  if (!http.begin(HOST, PORT)) {
+    Serial.print(F("http.begin() failed — CME "));
     Serial.println(modem.at().lastCmeError());
     return;
   }
-  Serial.println(F("Connected."));
 
-  // Build and send the full request in a single write — one AT#IPSENDTCP
-  // round-trip is cheaper than four println()s on NB-IoT.
-  char req[192];
-  int n = snprintf(req, sizeof(req),
-                   "GET %s HTTP/1.0\r\n"
-                   "Host: %s\r\n"
-                   "User-Agent: ST87M01/1.0\r\n"
-                   "Connection: close\r\n"
-                   "\r\n",
-                   PATH_, HOST);
-  Serial.print(F("TX request ("));
-  Serial.print(n);
-  Serial.println(F(" B):"));
-  Serial.print(req);     // show what we're sending
-  client.write(reinterpret_cast<const uint8_t*>(req), (size_t)n);
+  http.addHeader("User-Agent", "ST87M01/1.0");
 
-  Serial.println(F("--- response ---"));
+  Serial.print(F("GET "));
+  Serial.println(PATH_);
 
-  unsigned long start = millis();
-  unsigned long lastByte = start;
+  if (!http.get(PATH_, RESPONSE_TIMEOUT_MS)) {
+    Serial.print(F("http.get() failed — CME "));
+    Serial.println(modem.at().lastCmeError());
+    http.end();
+    return;
+  }
+
+  Serial.print(F("Status: "));
+  Serial.println(http.statusCode());
+  Serial.print(F("Content-Length: "));
+  Serial.println(http.contentLength());
+
+  Serial.println(F("--- headers ---"));
+  Serial.print(http.rawHeaders());
+  Serial.println(F("--- body ---"));
+
+  unsigned long lastByte = millis();
   size_t rxCount = 0;
 
-  // Read until: (a) server closes and buffer is drained, (b) idle timeout
-  // with nothing new arriving, (c) hard ceiling. HTTP/1.0 + Connection:
-  // close means (a) is the normal path.
-  while (true) {
-    if ((millis() - start)    >= READ_HARD_TIMEOUT_MS) { Serial.println(F("\n[hard timeout]")); break; }
-    if ((millis() - lastByte) >= READ_IDLE_TIMEOUT_MS) { Serial.println(F("\n[idle timeout]")); break; }
-    if (!client.connected() && client.available() <= 0) break;
-
+  while (!http.eof()) {
     modem.poll();
-    while (client.available() > 0) {
-      int b = client.read();
-      if (b < 0) break;
-      Serial.write(static_cast<uint8_t>(b));
-      rxCount++;
-      lastByte = millis();
+
+    int n = http.available();
+    if (n > 0) {
+      while (http.available() > 0) {
+        int b = http.read();
+        if (b < 0) break;
+        Serial.write(static_cast<uint8_t>(b));
+        rxCount++;
+        lastByte = millis();
+      }
+    } else {
+      if ((millis() - lastByte) >= READ_IDLE_TIMEOUT_MS) {
+        Serial.println(F("\n[idle timeout waiting for more body]"));
+        break;
+      }
+      delay(10);
     }
   }
 
   Serial.println(F("--- end ---"));
   Serial.print(F("Received "));
   Serial.print(rxCount);
-  Serial.print(F(" bytes in "));
-  Serial.print(millis() - start);
-  Serial.println(F(" ms."));
+  Serial.println(F(" body bytes."));
 
-  size_t dropped = client.droppedBytes();
+  size_t dropped = http.droppedBytes();
   if (dropped) {
     Serial.print(F("WARNING: "));
     Serial.print(dropped);
-    Serial.println(F(" bytes were silently dropped — response incomplete."));
-    Serial.println(F("Pick a smaller endpoint, or wait until AT#HTTP* support lands."));
+    Serial.println(F(" bytes were silently dropped — a single chunk exceeded the local buffer."));
   }
 
-  client.stop();
+  http.end();
   Serial.println(F("Done."));
 }
 
