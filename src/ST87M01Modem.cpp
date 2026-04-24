@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Pontus Oldberg / iLabs (https://ilabs.se)
+//
+// Part of the iLabs ST87M01 Arduino library.
+// See LICENSE at the library root for full terms.
+
 #include "ST87M01Modem.h"
 
 ST87M01Modem::ST87M01Modem(Stream& serial, const ST87M01Pins& pins)

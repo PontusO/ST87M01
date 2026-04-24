@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Pontus Oldberg / iLabs (https://ilabs.se)
+//
+// Part of the iLabs ST87M01 Arduino library.
+// See LICENSE at the library root for full terms.
+
 #include "ST87M01NBIoT.h"
 
 ST87M01NBIoT::ST87M01NBIoT(ST87M01Modem& modem, uint8_t cid)

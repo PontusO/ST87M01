@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Pontus Oldberg / iLabs (https://ilabs.se)
+//
+// Part of the iLabs ST87M01 Arduino library.
+// See LICENSE at the library root for full terms.
+
 /*
   ST87M01 ConfigureDns — one-time per-device setup.
 
