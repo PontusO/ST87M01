@@ -58,7 +58,11 @@ public:
   bool resolveHost(uint8_t cid, const char* host, String& ip);
   bool ping(uint8_t cid, const char* hostOrIp);
 
-  bool createSocket(uint8_t cid, bool tcp, uint8_t& socketId, uint16_t localPort = 0);
+  // Creates a socket. `secProfile` selects a TLS security profile (1-9) that
+  // must already be provisioned via ST87M01TLS; 0 means a plain (unsecured)
+  // socket and is byte-identical on the AT wire to the pre-TLS behavior.
+  bool createSocket(uint8_t cid, bool tcp, uint8_t& socketId,
+                    uint16_t localPort = 0, uint8_t secProfile = 0);
   bool connectTcp(uint8_t cid, uint8_t socketId, const char* ip, uint16_t port);
   bool sendTcp(uint8_t cid, uint8_t socketId, const uint8_t* data, size_t len);
   bool sendUdp(uint8_t cid, uint8_t socketId, const char* ip, uint16_t port,

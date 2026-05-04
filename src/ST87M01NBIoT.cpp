@@ -356,24 +356,76 @@ bool ST87M01NBIoT::getEDRX(ST87M01EdrxInfo& info) {
 // ---------------------------------------------------------------------------
 
 bool ST87M01NBIoT::setSleep(bool enable, uint32_t holdSeconds, uint32_t awakeSeconds) {
+  // AT#SLEEPMODE is NVM-only-active-after-AT#RESET=1. Read the currently
+  // loaded values; if they already match what we want, no write or reset
+  // is needed and we return immediately.
+  uint8_t curEn = 0;
+  uint32_t curHold = 0, curAwake = 0;
+  bool readOk = getSleep(curEn, curHold, curAwake);
+  uint8_t wantEn = enable ? 1u : 0u;
+  if (readOk && curEn == wantEn && curHold == holdSeconds && curAwake == awakeSeconds) {
+    return true;
+  }
+
+  // Write the new working-copy values.
+  bool writeOk;
   if (!enable) {
     _modem.at().send("AT#SLEEPMODE=0");
-    return _modem.at().expectOK(2000);
-  }
-  if (awakeSeconds > 0) {
+    writeOk = _modem.at().expectOK(2000);
+  } else if (awakeSeconds > 0) {
     _modem.at().sendf("AT#SLEEPMODE=1,%u,%u",
                       (unsigned)holdSeconds, (unsigned)awakeSeconds);
+    writeOk = _modem.at().expectOK(2000);
   } else if (holdSeconds > 0) {
     _modem.at().sendf("AT#SLEEPMODE=1,%u", (unsigned)holdSeconds);
+    writeOk = _modem.at().expectOK(2000);
   } else {
     _modem.at().send("AT#SLEEPMODE=1");
+    writeOk = _modem.at().expectOK(2000);
   }
-  return _modem.at().expectOK(2000);
+  if (!writeOk) return false;
+
+  // Commit to NVM + reboot so the new values take effect. This is the
+  // ~25 s cost of the configuration call. Subsequent calls with the
+  // same values short-circuit at the read above and don't pay it.
+  return _modem.softReset(30000);
 }
 
 bool ST87M01NBIoT::sleepNow() {
   _modem.at().send("AT#SLEEPMODE");
   return _modem.at().expectOK(2000);
+}
+
+bool ST87M01NBIoT::getSleep(uint8_t& enable, uint32_t& holdSeconds, uint32_t& awakeSeconds) {
+  enable = 0;
+  holdSeconds = 0;
+  awakeSeconds = 0;
+
+  String line;
+  _modem.at().send("AT#SLEEPMODE?");
+  if (!_modem.at().waitLineStartsWith("#SLEEPMODE:", line, 2000)) return false;
+  if (!_modem.at().expectOK(2000)) return false;
+
+  int colon = line.indexOf(':');
+  if (colon < 0) return false;
+  String rest = line.substring(colon + 1);
+  rest.trim();
+
+  // Format: #SLEEPMODE: <enable>,<hold_time>,<awake_time>
+  int c1 = rest.indexOf(',');
+  int c2 = (c1 >= 0) ? rest.indexOf(',', c1 + 1) : -1;
+  if (c1 < 0) {
+    enable = (uint8_t)rest.toInt();
+    return true;
+  }
+  enable = (uint8_t)rest.substring(0, c1).toInt();
+  if (c2 >= 0) {
+    holdSeconds  = (uint32_t)rest.substring(c1 + 1, c2).toInt();
+    awakeSeconds = (uint32_t)rest.substring(c2 + 1).toInt();
+  } else {
+    holdSeconds  = (uint32_t)rest.substring(c1 + 1).toInt();
+  }
+  return true;
 }
 
 bool ST87M01NBIoT::setSleepIndications(uint8_t bitmap) {

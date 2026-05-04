@@ -1,2 +1,4 @@
 .arduino-cli
 .vscode
+.github/
+doc/

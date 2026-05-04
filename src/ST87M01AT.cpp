@@ -77,6 +77,16 @@ void ST87M01AT::endCommand() {
   if (_debug) _debug->println();
 }
 
+void ST87M01AT::writeRaw(const uint8_t* data, size_t len) {
+  if (!data || !len) return;
+  _serial.write(data, len);
+  if (_debug) {
+    _debug->print(F(">>> ["));
+    _debug->print(static_cast<unsigned>(len));
+    _debug->println(F(" raw bytes]"));
+  }
+}
+
 bool ST87M01AT::expectOK(unsigned long timeoutMs) {
   String line;
   return waitFinalResult(&line, timeoutMs);
@@ -242,7 +252,14 @@ bool ST87M01AT::isFinalOk(const String& line) const {
 }
 
 bool ST87M01AT::isFinalError(const String& line) const {
-  return line == "ERROR" || line.startsWith("+CME ERROR:");
+  // Some modem firmware paths (e.g. AT#TLSCERTADD on the ST87M0) emit a
+  // bare "+CME ERROR" with no colon and no error code, even with
+  // AT+CMEE=2. Treat that as a final result — otherwise we wait for OK
+  // and stall the entire timeout.
+  return line == "ERROR" ||
+         line == "+CME ERROR" ||
+         line.startsWith("+CME ERROR:") ||
+         line.startsWith("+CME ERROR ");
 }
 
 void ST87M01AT::parseError(const String& line) {
@@ -250,4 +267,6 @@ void ST87M01AT::parseError(const String& line) {
   if (line.startsWith("+CME ERROR:")) {
     _lastCmeError = line.substring(11).toInt();
   }
+  // Bare "+CME ERROR" — leave _lastCmeError at 0; caller can distinguish
+  // a not-yet-set CME from a real CME 0 by remembering the prior state.
 }

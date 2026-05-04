@@ -8,7 +8,9 @@
 
 ST87M01HTTP::ST87M01HTTP(ST87M01Modem& modem, uint8_t cid)
 : _modem(modem), _cid(cid), _socketId(0xFF),
+  _securityProfile(0),
   _socketOpen(false), _httpStarted(false),
+  _lastTlsError(0),
   _lastSpeculativeReadMs(0),
   _statusCode(0), _contentLength(0), _bodyDelivered(0),
   _bufLen(0), _bufPos(0),
@@ -36,18 +38,21 @@ void ST87M01HTTP::resetResponseState() {
   _disconnected = false;
 }
 
-bool ST87M01HTTP::begin(const char* host, uint16_t port) {
+bool ST87M01HTTP::begin(const char* host, uint16_t port, uint8_t secProfile) {
   if (!host || !*host) return false;
 
   if (_socketOpen) end();
   resetResponseState();
+  _lastTlsError = 0;
 
   _host = host;
+  _securityProfile = secProfile;
 
-  // Create TCP socket. frame_received_urc=1 is what the HTTP app note uses;
-  // it enables the raw-IP URCs (which we ignore while HTTP is in control),
-  // but the socket is still tracked by ST87M01Modem so droppedBytes() works.
-  if (!_modem.createSocket(cid(), /*tcp=*/true, _socketId, /*localPort=*/0)) {
+  // Create TCP socket. When secProfile is non-zero, the modem performs a TLS
+  // handshake transparently inside the subsequent AT#TCPCONNECT — from the
+  // HTTP layer's perspective everything else is identical to plain HTTP.
+  if (!_modem.createSocket(cid(), /*tcp=*/true, _socketId, /*localPort=*/0,
+                           secProfile)) {
     return false;
   }
   _socketOpen = true;
@@ -410,7 +415,16 @@ void ST87M01HTTP::onHttpRecvUrc(const String& line, void* ctx) {
   }
 }
 
-void ST87M01HTTP::onHttpDiscUrc(const String& /*line*/, void* ctx) {
+void ST87M01HTTP::onHttpDiscUrc(const String& line, void* ctx) {
   auto* self = static_cast<ST87M01HTTP*>(ctx);
   self->_disconnected = true;
+
+  // HTTPS variant: "#HTTPDISC: <tls_error_code>". For plain HTTP the URC has
+  // no payload, so leave _lastTlsError untouched.
+  int colon = line.indexOf(':');
+  if (colon >= 0) {
+    String rest = line.substring(colon + 1);
+    rest.trim();
+    if (rest.length()) self->_lastTlsError = rest.toInt();
+  }
 }

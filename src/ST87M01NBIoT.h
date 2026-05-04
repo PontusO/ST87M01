@@ -120,10 +120,29 @@ public:
   //                   this after a wake. Values 1..600 are rejected by the
   //                   modem itself — don't pass them.
   //
-  // NOTE: AT#SLEEPMODE is saved to NVM via AT#RESET=1; the library does NOT
-  // automatically reset. Call modem.softReset() after all sleep/PSM/eDRX
-  // configuration is in place if you want settings to survive a power cycle.
+  // Configure the modem's deep-sleep behaviour. AT#SLEEPMODE is NVM-only-
+  // active-after-AT#RESET=1, so this method reads the currently active
+  // values, and if they don't already match what's been asked for it
+  // writes the new values and triggers a soft-reset (waits for the modem
+  // to come back, ~25 s). On subsequent calls with the same values it's
+  // a cheap no-op (single AT#SLEEPMODE? round-trip).
+  //
+  // Call this AFTER modem.begin() and BEFORE network.begin() — a soft-
+  // reset invalidates any active PDP / socket state.
+  //
+  //   holdSeconds  -> seconds after the last AT command before the modem
+  //                   is allowed to enter deep sleep. 0 = no hold time.
+  //   awakeSeconds -> module-side awake-watchdog: 0 disables, values
+  //                   above 600 enable it (the modem self-resets if AT
+  //                   activity stays quiet longer than this after a
+  //                   wake). Values 1..600 are rejected by the modem.
   bool setSleep(bool enable, uint32_t holdSeconds = 0, uint32_t awakeSeconds = 0);
+
+  // Read back the currently active AT#SLEEPMODE settings (i.e. what was
+  // last committed to NVM and loaded at boot). setSleep() uses this
+  // internally to skip the reset on no-op calls; exposed so sketches can
+  // log / display what's in force.
+  bool getSleep(uint8_t& enable, uint32_t& holdSeconds, uint32_t& awakeSeconds);
 
   // Execute AT#SLEEPMODE with no parameters — cancels any pending hold-timer
   // and puts the modem to sleep immediately.

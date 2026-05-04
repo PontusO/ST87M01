@@ -32,6 +32,13 @@ public:
   void writeHex(const uint8_t* data, size_t len);
   void endCommand();
 
+  // Push raw bytes directly to the modem. Used for AT commands that accept a
+  // binary payload AFTER an OK response (e.g. AT#TLSCERTADD without inline
+  // <data>) — the host first sends the command + \r, waits for OK, then
+  // streams exactly <data_length> bytes via this method. No framing or
+  // escaping is applied.
+  void writeRaw(const uint8_t* data, size_t len);
+
   bool expectOK(unsigned long timeoutMs = 1000);
   bool expectPrompt(char prompt = '>', unsigned long timeoutMs = 1000);
 

@@ -15,7 +15,7 @@
 // call, so large responses never overflow the library's RX buffer the way
 // they do over raw TCP.
 //
-// Usage:
+// Usage (HTTP):
 //     ST87M01HTTP http(modem);
 //     http.begin("example.com", 80);
 //     http.addHeader("User-Agent", "ST87M01/1.0");   // optional
@@ -28,6 +28,18 @@
 //     }
 //     http.end();
 //
+// Usage (HTTPS): provision a CA cert into a security profile via ST87M01TLS,
+// then pass that profile id (1-9) as the third argument to begin(). All HTTP
+// commands behave identically; only AT#SOCKETCREATE differs (8th param is
+// the profile id), and #HTTPDISC carries a TLS error code on handshake
+// failures — readable via lastTlsError().
+//
+//     ST87M01TLS tls(modem);
+//     tls.addCaCertPem(1, isrgRootX1Pem);
+//     ST87M01HTTP https(modem);
+//     https.begin("api.example.com", 443, /*secProfile=*/1);
+//     https.get("/");
+//
 // Only one HTTP session can be active at a time (the modem allows exactly
 // one HTTP socket). Call end() before starting another.
 class ST87M01HTTP {
@@ -38,9 +50,21 @@ public:
   uint8_t cid() const { return _cid ? _cid : _modem.defaultCid(); }
 
   // Opens a TCP socket to host:port and starts the HTTP stack. `host` is
-  // kept for use as the HTTP Host header in subsequent requests. Returns
-  // true on success; on failure, modem.at().lastCmeError() has details.
-  bool begin(const char* host, uint16_t port = 80);
+  // kept for use as the HTTP Host header in subsequent requests. Pass a
+  // non-zero `secProfile` (1-9) to upgrade the underlying socket to TLS
+  // using the named security profile (must already be provisioned via
+  // ST87M01TLS); 0 means plain HTTP. Returns true on success; on failure,
+  // modem.at().lastCmeError() and lastTlsError() have details.
+  bool begin(const char* host, uint16_t port = 80, uint8_t secProfile = 0);
+
+  // Active TLS profile (0 if plain HTTP).
+  uint8_t securityProfile() const { return _securityProfile; }
+
+  // Last #HTTPDISC TLS error code, 0 if none. Set when the modem reports
+  // "#HTTPDISC: <tls_error_code>" — typical causes are CA mismatch, server
+  // cert chain failure, or TLS protocol-version negotiation failure. Cleared
+  // on the next successful begin().
+  int lastTlsError() const { return _lastTlsError; }
 
   // Tear down: AT#HTTPSTOP + AT#SOCKETCLOSE.
   void end();
@@ -97,8 +121,10 @@ private:
   ST87M01Modem& _modem;
   uint8_t _cid;
   uint8_t _socketId;
+  uint8_t _securityProfile;
   bool _socketOpen;
   bool _httpStarted;
+  int  _lastTlsError;
 
   String _host;
 

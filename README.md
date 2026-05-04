@@ -14,6 +14,8 @@ Validated on real hardware against 1NCE NB-IoT as of 2026-04-24:
 - DNS resolution (`AT#DNS`) and ping (`AT#IPPING`).
 - PSM negotiated with the network; requested and granted timer values are both readable.
 
+HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and compiles clean across all examples; hardware validation is pending. Mutual TLS and PSK cipher suites are not yet exposed — see [HTTPS / TLS](#https--tls) below for the current scope.
+
 Known limits and workarounds are covered in [Known quirks](#known-quirks) below. All AT commands are cross-checked against the ST87MXX UM AT Commands manual v3.1 (2025-10-06).
 
 ## Supported boards
@@ -74,7 +76,8 @@ Five layers, bottom-up. Each layer holds a reference to the one below it — not
 
 Two more specialist adapters sit alongside the socket layer:
 
-- **`ST87M01HTTP`** — HTTP client built on the modem's native `AT#HTTP*` command family. Use this for HTTP instead of raw TCP via `ST87M01Client` — the modem delivers HTTP responses in discrete chunks via `AT#HTTPREAD`, so arbitrary response sizes work.
+- **`ST87M01HTTP`** — HTTP and HTTPS client built on the modem's native `AT#HTTP*` command family. Use this for HTTP instead of raw TCP via `ST87M01Client` — the modem delivers HTTP responses in discrete chunks via `AT#HTTPREAD`, so arbitrary response sizes work. For HTTPS, pass a TLS profile id (provisioned via `ST87M01TLS`) as the third arg to `begin()`.
+- **`ST87M01TLS`** — TLS profile / certificate provisioning. Wraps `AT#TLSCERT*` to upload CA root certs into the modem's secure storage; the resulting profile id is what `ST87M01HTTP::begin()` consumes for HTTPS.
 - **`ST87M01NBIoT`** — NB-IoT-specific extras: PSM, eDRX, sleep mode, wake-up-event configuration, cell/signal/operator info, IMSI, ping.
 
 ## Which class for what
@@ -85,6 +88,7 @@ Two more specialist adapters sit alongside the socket layer:
 | Raw TCP, small request/response | `ST87M01Client` |
 | Raw UDP | `ST87M01UDP` |
 | HTTP GET/POST of arbitrary size | `ST87M01HTTP` |
+| HTTPS (server-auth TLS 1.2) | `ST87M01TLS` (provision CA) + `ST87M01HTTP` (`begin(host, 443, profileId)`) |
 | MQTT / NTP / any `Client`-based library | `ST87M01Client` / `ST87M01UDP` |
 | Register on the network and monitor signal | `ST87M01Modem::getCellInfo()` / `getSignal()` + `ST87M01NBIoT` |
 | PSM / eDRX / deep sleep / low-power wake | `ST87M01NBIoT` |
@@ -102,6 +106,44 @@ ST87M01Modem modem(Serial1, ST87M01Pins{
 ```
 
 Each pin defaults to `-1` (= not wired) and each has a polarity flag (`resetActiveLow` / `wakeupActiveLow` / `ringActiveLow`), all defaulting to active-low.
+
+## HTTPS / TLS
+
+HTTPS rides on top of `ST87M01HTTP` — same API, same lifecycle, same workarounds for the modem's HTTP quirks. The only difference is at the socket layer: `AT#SOCKETCREATE` takes an extra `<security_profile_id>` argument that selects a TLS profile already provisioned on the modem, and the subsequent `AT#TCPCONNECT` performs a TLS handshake transparently.
+
+**Phase 1 (current scope): server-authenticated TLS 1.2 with a CA root cert.** Mutual TLS (client cert + private key) and PSK cipher suites are deferred to follow-ups.
+
+```cpp
+#include <ST87M01TLS.h>
+#include <ST87M01HTTP.h>
+
+ST87M01TLS  tls(modem);
+ST87M01HTTP https(modem);
+
+// Once per device (or once per CA-rotation): provision a CA root cert into a
+// security profile (1-9). PEM and DER are both accepted.
+tls.addCaCertPem(/*profileId=*/1, isrgRootX1Pem);
+tls.saveToNvm();   // optional — persist across power cycle (issues AT#RESET=1)
+
+// Per session:
+https.begin("api.example.com", 443, /*secProfile=*/1);
+https.get("/v1/health");
+```
+
+Server identity verification is **all-or-nothing**: provisioning a CA cert into the profile turns on chain validation; without one the modem skips it entirely. SNI is taken automatically from the host argument. On TLS failure, `AT#TCPCONNECT` returns `ERROR` and the modem reports a `#HTTPDISC: <tls_error_code>` URC — read it via `https.lastTlsError()`.
+
+Storage limits: up to 9 security profiles (ids 1-9), each holding a CA cert plus future client cert + private key. Certs must be DER-encoded on the wire; `addCaCertPem()` decodes the standard PEM form (between `-----BEGIN CERTIFICATE-----` markers) host-side.
+
+**Modem-side caveats** (observed against an ST87M0 1NCE board, 2026-05-04):
+
+- **The TLS engine is ECDSA-only.** The cipher suites the modem documents are all `TLS_ECDHE_ECDSA_WITH_*` (no RSA suites), and the CA-cert parser confirms it: RSA roots (Amazon Root CA 1 / 2048-bit; ISRG Root X1 / 4096-bit) are rejected with `+CME ERROR`, while ECDSA P-256 roots (Amazon Root CA 3) are accepted. ECDSA P-384 (ISRG Root X2) is also rejected — only **P-256 and Brainpool-P256** work.
+- **AT command line caps near 1.5 KB**, so the cert plus framing has to fit there hex-encoded. ECDSA P-256 roots (~250-500 bytes DER) are well within budget; RSA-4096 (1391 bytes / 2782 hex chars) overflows and the upload silently hangs.
+- **`AT#TLSCERTADD` requires `AT+CFUN=4`** (RF off / minimum functionality). The library auto-toggles this internally around each upload and restores the prior CFUN level on the way out — a sketch that's already attached doesn't need to do anything special.
+- **`+CME ERROR` may arrive without a code or text** even with `AT+CMEE=2`. The AT layer recognizes the bare form as a final result so the call returns immediately rather than waiting for the timeout.
+
+**Practical implication: most public Let's Encrypt-signed endpoints can NOT be talked to by this modem.** LE chains via either ISRG Root X1 (RSA-4096, too big) or ISRG Root X2 (ECDSA P-384, wrong curve), and every LE intermediate is P-384. For real deployments, host your backend behind AWS IoT (which issues ECDSA P-256 chains via Amazon Root CA 3), a CloudFront ECC distribution, or your own ACME server issuing P-256. The `HttpsGet` example provisions **Amazon Root CA 3** and targets `valid.rootca3.demo.amazontrust.com`, which Amazon operates specifically to demonstrate Root CA 3 trust.
+
+See [`examples/HttpsGet`](examples/HttpsGet) for the full flow.
 
 ## Low-power: PSM, eDRX, sleep mode
 
@@ -125,6 +167,8 @@ The API handles the unpleasant parts for you: the T3412-extended / T3324 GPRS ti
 
 Coordinating MCU sleep with modem PSM: the modem's PSM puts the **modem** into deep sleep; putting the MCU to sleep alongside it is your application's job. The ring pin (routed by the board header) is the signal for "modem has something to tell the host" — wire it to a GPIO interrupt so the MCU can wake from deep sleep when the modem has data or a URC for you.
 
+For MCU-side sleep, install the companion **[`iLabs_RPi_PowerManager`](../iLabs_RPi_PowerManager/)** library — it provides `RP2350Power` (resume model, `Light`/`Medium`/`Deep`/`Dormant`) and `RP2350ColdBootPower` (POWMAN P1.x cold-boot via bootrom warm-restart). For sub-mA host-side floors on the iLabs Challenger 2350 NB-IoT carrier, also install `iLabs_PMC` — it provides a separate `PMCPowerManager` adapter that plugs into the same `PowerManager&` interface and cuts MCU power entirely via the on-board PMC. The `LowPowerLoop` and `CfunOff` examples in this library `#include <RP2350Power.h>` from `iLabs_RPi_PowerManager`.
+
 ## Examples
 
 Located in [`examples/`](examples), in rough order of complexity:
@@ -136,7 +180,9 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **UdpSend** — NTP round-trip.
 - **TcpEcho** — raw TCP fetch against `ifconfig.me/ip`.
 - **HttpGet** — HTTP GET via `ST87M01HTTP`, large-body handling.
+- **HttpsGet** — HTTPS GET. Provisions ISRG Root X1 into a TLS profile then opens a secure session via `ST87M01TLS` + `ST87M01HTTP::begin(host, 443, profileId)`.
 - **PsmSleep** — negotiate PSM with the network, read requested vs. granted timers, optionally enable sleep URCs.
+- **LowPowerLoop** — UDP/NTP heartbeat with both modem PSM and RP2350 light-sleep; demonstrates the `RP2350Power` + `ST87M01NBIoT` coordination pattern with timer + ring-pin wake.
 
 ## Known quirks
 
@@ -147,7 +193,8 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **Stale PSM state.** `AT+CPSMS` settings are saved to NVM via `AT#RESET=1`. A modem that boots already in PSM mode can misbehave during the first attach — `nbiot.resetPSM()` early in setup clears the stored values. The `PsmSleep` example does this automatically.
 - **`AT#SLEEPIND` and `AT#SLEEPMODE` settings persist only after `AT#RESET=1`.** The `modem.softReset()` helper takes care of the reset and re-probe; the library does not call it automatically.
 - **Only one in-flight AT transaction.** `ST87M01Modem`, `ST87M01Network`, `ST87M01Client`, `ST87M01UDP`, `ST87M01NBIoT`, and `ST87M01HTTP` all share the same AT channel. Do not issue AT commands from a URC handler.
-- **URC-handler budget: 8.** `ST87M01Modem::begin` registers 3 (CEREG, IPRECV, SOCKETCLOSED). `ST87M01HTTP` registers 2 if instantiated; `ST87M01NBIoT` registers 3. All four stacks together = the full 8.
+- **URC-handler budget: 8.** `ST87M01Modem::begin` registers 3 (CEREG, IPRECV, SOCKETCLOSED). `ST87M01HTTP` registers 2 if instantiated; `ST87M01NBIoT` registers 3. All four stacks together = the full 8. HTTPS reuses the same `#HTTPRECV` / `#HTTPDISC` handlers — `ST87M01TLS` registers no URCs of its own.
+- **TLS credentials are RAM-only by default.** `AT#TLSCERTADD` takes effect immediately but doesn't persist across power cycle until `AT#RESET=1`. Call `ST87M01TLS::saveToNvm()` once after provisioning; the modem reboots and you'll need to re-attach.
 
 ## Reference
 

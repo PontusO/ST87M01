@@ -367,11 +367,22 @@ bool ST87M01Modem::ping(uint8_t cid, const char* hostOrIp) {
   return _at.expectOK(120000);
 }
 
-bool ST87M01Modem::createSocket(uint8_t cid, bool tcp, uint8_t& socketId, uint16_t localPort) {
+bool ST87M01Modem::createSocket(uint8_t cid, bool tcp, uint8_t& socketId,
+                                uint16_t localPort, uint8_t secProfile) {
   String line;
   // ip_version=0 (IPv4), type="TCP"/"UDP", local_port (empty = random),
   // send_timeout=10s, receive_timeout=10s, frame_received_urc=2 (fires #IPRECV with length).
-  if (localPort) {
+  // 8th parameter <security_profile_id> is omitted for plain sockets so the
+  // AT line stays byte-identical to the pre-TLS behavior.
+  if (secProfile) {
+    if (localPort) {
+      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,2,%u",
+                cid, tcp ? "TCP" : "UDP", localPort, secProfile);
+    } else {
+      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,2,%u",
+                cid, tcp ? "TCP" : "UDP", secProfile);
+    }
+  } else if (localPort) {
     _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,2",
               cid, tcp ? "TCP" : "UDP", localPort);
   } else {
