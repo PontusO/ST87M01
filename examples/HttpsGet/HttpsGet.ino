@@ -15,33 +15,45 @@
   the CA across power cycle (issues AT#RESET=1, which reboots the modem
   and forces another network registration).
 
-  Server identity verification is "all or nothing" on the ST87M01: if the
-  CA chain validates against a provisioned root, the connection succeeds;
-  if not, AT#TCPCONNECT returns ERROR and the modem reports the failure
-  via #HTTPDISC: <tls_error_code> — readable here through
-  http.lastTlsError().
+  On TLS failure, AT#TCPCONNECT returns ERROR and the modem reports the
+  failure via #HTTPDISC: <tls_error_code> — readable here through
+  https.lastTlsError().
 
   HOST/CA: by default this targets https://valid.rootca3.demo.amazontrust.com,
   which Amazon operates specifically as a TLS demonstration endpoint signed
-  by Amazon Root CA 3 (ECDSA P-256). To target your own server, swap HOST
-  + PATH and embed the corresponding CA root PEM — but be aware of the
-  algorithm constraints below.
+  by Amazon Root CA 3 (ECDSA P-256). The reason a single-cert import works
+  here is that Amazon's leaf for this hostname is signed DIRECTLY by Root
+  CA 3 — there's no intermediate to walk. See the chain-validation note
+  below before swapping in a different host.
 
-  Constraints observed on the ST87M0 (firmware as of 2026-05-04):
-   * The TLS engine appears to be ECDSA-only — the documented cipher
-     suites are all TLS_ECDHE_ECDSA_WITH_*, and the CA-cert parser
-     rejects RSA roots (Amazon Root CA 1 / 2048-bit, ISRG Root X1 / 4096-
-     bit) and ECDSA P-384 roots (ISRG Root X2). Only ECDSA P-256 (e.g.
-     Amazon Root CA 3) and Brainpool P-256 are accepted.
+  Constraints to know before swapping HOST + CA:
+
+   * Certificate chain validation is NOT supported (TLS app note §3.3.2).
+     The modem only verifies that the server's leaf cert is signed by
+     EXACTLY the cert imported into the profile — it will not walk a
+     multi-level chain. So for a typical "server → intermediate → root"
+     deployment, import the INTERMEDIATE that signs the leaf, not the
+     root above it. The Amazon demo endpoint used here works with the
+     root imported only because there is no intermediate.
+
+   * The CA-cert parser is ECDSA-only and curve-restricted to P-256 /
+     Brainpool-P256 (empirical, not in the doc). RSA roots (Amazon Root
+     CA 1 / 2048-bit, ISRG Root X1 / 4096-bit) and ECDSA P-384 roots
+     (ISRG Root X2) are rejected at AT#TLSCERTADD time. The documented
+     TLS 1.2 cipher list (Table 6, all TLS_ECDHE_ECDSA_WITH_*) implies
+     this for handshakes, but the parser is stricter still.
+
    * The AT command line caps near 1.5 KB; CA certs have to fit there
      after hex-encoding. ECDSA P-256 roots (~250-500 bytes DER) are well
      within budget; RSA-4096 (1391 bytes / 2782 hex chars) overflows.
-   * AT#TLSCERTADD requires the modem in AT+CFUN=4 (RF off). The
-     ST87M01TLS class auto-toggles this internally.
+
+   * AT#TLSCERTADD requires the modem in AT+CFUN=4 (RF off, empirical).
+     The ST87M01TLS class auto-toggles this internally.
 
   Practical implication: most public Let's Encrypt-signed endpoints can
-  NOT be talked to by this modem (LE chains via RSA Root X1 or ECDSA
-  P-384 X2 — neither is accepted). For real deployments, host your
+  NOT be talked to by this modem. The two LE roots (X1 RSA-4096, X2
+  P-384) are both rejected, and every LE intermediate (R10/R11/E1/E5/E6)
+  is RSA-2048 or P-384 — also rejected. For real deployments, host your
   backend behind AWS IoT / a CloudFront ECC distribution, or stand up
   your own ACME server issuing P-256 chains.
 

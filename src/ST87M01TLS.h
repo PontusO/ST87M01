@@ -25,24 +25,43 @@
 // until AT#RESET=1 commits it to NVM. Provision once, then call
 // saveToNvm() — the modem reboots and network registration must be redone.
 //
-// Important caveats discovered on the ST87M0 (firmware as of 2026-05-04):
-//   * Provisioning rejects with a bare "+CME ERROR" if RF is active. The
-//     class auto-toggles AT+CFUN=4 around each upload and restores the
-//     prior CFUN level on the way out, so callers don't have to think
-//     about it. If the modem is already at AT+CFUN=4, the toggle is
-//     skipped.
+// Important caveats. Some come straight from ST's TLS Application Note
+// (v2.0, 2025-07-30); others were discovered on hardware (firmware as of
+// 2026-05-04) and aren't in the doc.
+//
+// Documented:
+//   * Certificate chain validation is NOT supported. The modem only
+//     verifies that the server's leaf certificate is signed by exactly
+//     the cert you imported — it will not walk a chain. For typical
+//     deployments (server → intermediate → root) you must import the
+//     INTERMEDIATE that directly issues the leaf, not the root. (TLS
+//     app note §3.3.2.)
+//   * Only DER input is supported by AT#TLSCERTADD. The Pem overloads
+//     in this class decode to DER in the host before upload.
+//   * The TLS 1.2 cipher suite list is exclusively ECDHE_ECDSA + PSK.
+//     There are no RSA cipher suites in 1.2. TLS 1.3 suites are
+//     auth-agnostic by name, but in practice the parser below kicks in
+//     before any handshake. (TLS app note Table 6.)
+//
+// Hardware-only (not in the doc):
 //   * The CA-cert parser is ECDSA-only and curve-restricted to P-256 /
-//     Brainpool-P256. RSA roots and ECDSA P-384 roots are rejected with
-//     a bare "+CME ERROR". The documented cipher suites (all
-//     TLS_ECDHE_ECDSA_WITH_*) corroborate that the TLS engine itself is
-//     ECDSA-only — there are no RSA cipher suites at all.
-//   * Practical CA-size limit: cert + framing must fit in ~1.5 KB on the
-//     AT line (hex-encoded, so ~750 bytes DER). ECDSA P-256 roots
+//     Brainpool-P256. RSA roots and ECDSA P-384 roots are rejected
+//     with a bare "+CME ERROR" at AT#TLSCERTADD time, before any
+//     handshake.
+//   * AT#TLSCERTADD requires AT+CFUN=4 (RF off). With RF active the
+//     modem returns a bare "+CME ERROR". This class auto-toggles
+//     AT+CFUN=4 around each upload and restores the prior CFUN level
+//     on the way out; if the modem is already at AT+CFUN=4 the toggle
+//     is skipped.
+//   * Practical CA-size limit: cert + framing must fit in ~1.5 KB on
+//     the AT line (hex-encoded, so ~750 bytes DER). ECDSA P-256 roots
 //     comfortably fit; RSA-4096 (e.g. ISRG Root X1) is too big and the
 //     command silently hangs.
 //   * Most public Let's Encrypt sites can NOT be talked to — LE chains
-//     either ISRG Root X1 (RSA-4096) or X2 (P-384), neither acceptable.
-//     Use AWS IoT / Amazon Root CA 3 / Brainpool-signed chains instead.
+//     are either ISRG Root X1 (RSA-4096) or X2 (P-384), neither
+//     acceptable. Use AWS IoT, an ECC CloudFront distribution, or
+//     self-hosted P-256 chains. And remember: import the intermediate
+//     that signs the leaf, not the root.
 //
 // Usage:
 //     ST87M01TLS tls(modem);

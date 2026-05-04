@@ -14,7 +14,7 @@ Validated on real hardware against 1NCE NB-IoT as of 2026-04-24:
 - DNS resolution (`AT#DNS`) and ping (`AT#IPPING`).
 - PSM negotiated with the network; requested and granted timer values are both readable.
 
-HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and compiles clean across all examples; hardware validation is pending. Mutual TLS and PSK cipher suites are not yet exposed — see [HTTPS / TLS](#https--tls) below for the current scope.
+HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and hardware-validated against `valid.rootca3.demo.amazontrust.com` over a 1NCE NB-IoT link. Mutual TLS and PSK cipher suites are not yet exposed — see [HTTPS / TLS](#https--tls) below for the current scope.
 
 Known limits and workarounds are covered in [Known quirks](#known-quirks) below. All AT commands are cross-checked against the ST87MXX UM AT Commands manual v3.1 (2025-10-06).
 
@@ -120,9 +120,12 @@ HTTPS rides on top of `ST87M01HTTP` — same API, same lifecycle, same workaroun
 ST87M01TLS  tls(modem);
 ST87M01HTTP https(modem);
 
-// Once per device (or once per CA-rotation): provision a CA root cert into a
-// security profile (1-9). PEM and DER are both accepted.
-tls.addCaCertPem(/*profileId=*/1, isrgRootX1Pem);
+// Once per device (or once per CA-rotation): provision the cert that DIRECTLY
+// signs your server's leaf into a security profile (1-9). For a typical
+// "server → intermediate → root" chain that is the INTERMEDIATE, not the
+// root — see the no-chain-validation note below. PEM and DER are both
+// accepted.
+tls.addCaCertPem(/*profileId=*/1, amazonRootCA3Pem);
 tls.saveToNvm();   // optional — persist across power cycle (issues AT#RESET=1)
 
 // Per session:
@@ -130,18 +133,24 @@ https.begin("api.example.com", 443, /*secProfile=*/1);
 https.get("/v1/health");
 ```
 
-Server identity verification is **all-or-nothing**: provisioning a CA cert into the profile turns on chain validation; without one the modem skips it entirely. SNI is taken automatically from the host argument. On TLS failure, `AT#TCPCONNECT` returns `ERROR` and the modem reports a `#HTTPDISC: <tls_error_code>` URC — read it via `https.lastTlsError()`.
+On TLS failure, `AT#TCPCONNECT` returns `ERROR` and the modem reports a `#HTTPDISC: <tls_error_code>` URC — read it via `https.lastTlsError()`. SNI is taken automatically from the host argument.
 
-Storage limits: up to 9 security profiles (ids 1-9), each holding a CA cert plus future client cert + private key. Certs must be DER-encoded on the wire; `addCaCertPem()` decodes the standard PEM form (between `-----BEGIN CERTIFICATE-----` markers) host-side.
+Storage limits: up to 9 security profiles (ids 1-9), each holding a CA cert plus future client cert + private key. ITS holds at most 10 files in total across all profiles (TLS app note §3.3).
 
-**Modem-side caveats** (observed against an ST87M0 1NCE board, 2026-05-04):
+**Caveats — documented in the TLS app note (v2.0):**
 
-- **The TLS engine is ECDSA-only.** The cipher suites the modem documents are all `TLS_ECDHE_ECDSA_WITH_*` (no RSA suites), and the CA-cert parser confirms it: RSA roots (Amazon Root CA 1 / 2048-bit; ISRG Root X1 / 4096-bit) are rejected with `+CME ERROR`, while ECDSA P-256 roots (Amazon Root CA 3) are accepted. ECDSA P-384 (ISRG Root X2) is also rejected — only **P-256 and Brainpool-P256** work.
+- **Certificate chain validation is NOT supported** (TLS app note §3.3.2). The modem only verifies that the server's leaf cert is signed by *exactly the cert you imported* — it will not walk a multi-level chain. So for any "server → intermediate → root" deployment you must import the **intermediate** that issues the leaf, not the root. Endpoints whose leaf is signed directly by the root (e.g. `valid.rootca3.demo.amazontrust.com` → Amazon Root CA 3) work with the root imported because there is no intermediate.
+- **DER-only on the wire.** `addCaCertPem()` decodes the standard PEM form (between `-----BEGIN CERTIFICATE-----` markers) host-side before upload.
+- **Cipher suites** (TLS app note Table 6) are TLS 1.3 (`AES_128_{GCM,CCM,CCM_8}_SHA256`) and TLS/DTLS 1.2 `ECDHE_ECDSA_WITH_AES_*` + a PSK family. **No RSA cipher suites in TLS 1.2.**
+
+**Caveats — empirical, not in the doc** (observed against an ST87M0 1NCE board, 2026-05-04):
+
+- **The CA-cert parser is ECDSA-only and curve-restricted to P-256 / Brainpool-P256.** RSA roots (Amazon Root CA 1 / 2048-bit; ISRG Root X1 / 4096-bit) and ECDSA P-384 roots (ISRG Root X2) are rejected at `AT#TLSCERTADD` time with a bare `+CME ERROR`, before any handshake. The TLS 1.2 cipher list above implies this for handshakes, but the parser is stricter still.
 - **AT command line caps near 1.5 KB**, so the cert plus framing has to fit there hex-encoded. ECDSA P-256 roots (~250-500 bytes DER) are well within budget; RSA-4096 (1391 bytes / 2782 hex chars) overflows and the upload silently hangs.
 - **`AT#TLSCERTADD` requires `AT+CFUN=4`** (RF off / minimum functionality). The library auto-toggles this internally around each upload and restores the prior CFUN level on the way out — a sketch that's already attached doesn't need to do anything special.
 - **`+CME ERROR` may arrive without a code or text** even with `AT+CMEE=2`. The AT layer recognizes the bare form as a final result so the call returns immediately rather than waiting for the timeout.
 
-**Practical implication: most public Let's Encrypt-signed endpoints can NOT be talked to by this modem.** LE chains via either ISRG Root X1 (RSA-4096, too big) or ISRG Root X2 (ECDSA P-384, wrong curve), and every LE intermediate is P-384. For real deployments, host your backend behind AWS IoT (which issues ECDSA P-256 chains via Amazon Root CA 3), a CloudFront ECC distribution, or your own ACME server issuing P-256. The `HttpsGet` example provisions **Amazon Root CA 3** and targets `valid.rootca3.demo.amazontrust.com`, which Amazon operates specifically to demonstrate Root CA 3 trust.
+**Practical implication: most public Let's Encrypt-signed endpoints can NOT be talked to by this modem.** LE chains via either ISRG Root X1 (RSA-4096, too big) or ISRG Root X2 (ECDSA P-384, wrong curve), and every LE intermediate (R10/R11/E1/E5/E6) is RSA-2048 or P-384 — none of which the parser accepts. For real deployments, host your backend behind AWS IoT (which issues ECDSA P-256 chains via Amazon Root CA 3), a CloudFront ECC distribution, or your own ACME server issuing P-256, and remember to import the intermediate that signs your leaf, not the root above it. The `HttpsGet` example provisions **Amazon Root CA 3** and targets `valid.rootca3.demo.amazontrust.com`, which Amazon operates specifically to demonstrate Root CA 3 trust — its leaf is signed by the root directly, so a single-cert import works.
 
 See [`examples/HttpsGet`](examples/HttpsGet) for the full flow.
 
@@ -180,7 +189,7 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **UdpSend** — NTP round-trip.
 - **TcpEcho** — raw TCP fetch against `ifconfig.me/ip`.
 - **HttpGet** — HTTP GET via `ST87M01HTTP`, large-body handling.
-- **HttpsGet** — HTTPS GET. Provisions ISRG Root X1 into a TLS profile then opens a secure session via `ST87M01TLS` + `ST87M01HTTP::begin(host, 443, profileId)`.
+- **HttpsGet** — HTTPS GET. Provisions Amazon Root CA 3 (ECDSA P-256) into a TLS profile then opens a secure session to Amazon's `valid.rootca3.demo.amazontrust.com` via `ST87M01TLS` + `ST87M01HTTP::begin(host, 443, profileId)`.
 - **PsmSleep** — negotiate PSM with the network, read requested vs. granted timers, optionally enable sleep URCs.
 - **LowPowerLoop** — UDP/NTP heartbeat with both modem PSM and RP2350 light-sleep; demonstrates the `RP2350Power` + `ST87M01NBIoT` coordination pattern with timer + ring-pin wake.
 
