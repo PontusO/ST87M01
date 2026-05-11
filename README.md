@@ -14,7 +14,7 @@ Validated on real hardware against 1NCE NB-IoT as of 2026-04-24:
 - DNS resolution (`AT#DNS`) and ping (`AT#IPPING`).
 - PSM negotiated with the network; requested and granted timer values are both readable.
 
-HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and hardware-validated against `valid.rootca3.demo.amazontrust.com` over a 1NCE NB-IoT link. Mutual TLS and PSK cipher suites are not yet exposed — see [HTTPS / TLS](#https--tls) below for the current scope.
+HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and hardware-validated against `valid.rootca3.demo.amazontrust.com` over a 1NCE NB-IoT link. Mutual TLS (client certificate + private key) is implemented — see [HTTPS / TLS](#https--tls) below. PSK cipher suites are not yet exposed.
 
 Known limits and workarounds are covered in [Known quirks](#known-quirks) below. All AT commands are cross-checked against the ST87MXX UM AT Commands manual v3.1 (2025-10-06).
 
@@ -77,7 +77,7 @@ Five layers, bottom-up. Each layer holds a reference to the one below it — not
 Two more specialist adapters sit alongside the socket layer:
 
 - **`ST87M01HTTP`** — HTTP and HTTPS client built on the modem's native `AT#HTTP*` command family. Use this for HTTP instead of raw TCP via `ST87M01Client` — the modem delivers HTTP responses in discrete chunks via `AT#HTTPREAD`, so arbitrary response sizes work. For HTTPS, pass a TLS profile id (provisioned via `ST87M01TLS`) as the third arg to `begin()`.
-- **`ST87M01TLS`** — TLS profile / certificate provisioning. Wraps `AT#TLSCERT*` to upload CA root certs into the modem's secure storage; the resulting profile id is what `ST87M01HTTP::begin()` consumes for HTTPS.
+- **`ST87M01TLS`** — TLS profile / credential provisioning. Wraps `AT#TLSCERT*` and `AT#TLSKEY*` to upload CA root certs, client certificates, and ECC P-256 private keys into the modem's secure storage. The resulting profile id is what `ST87M01HTTP::begin()` consumes for HTTPS. Supports server-authenticated TLS and mutual TLS (mTLS).
 - **`ST87M01NBIoT`** — NB-IoT-specific extras: PSM, eDRX, sleep mode, wake-up-event configuration, cell/signal/operator info, IMSI, ping.
 
 ## Which class for what
@@ -89,6 +89,7 @@ Two more specialist adapters sit alongside the socket layer:
 | Raw UDP | `ST87M01UDP` |
 | HTTP GET/POST of arbitrary size | `ST87M01HTTP` |
 | HTTPS (server-auth TLS 1.2) | `ST87M01TLS` (provision CA) + `ST87M01HTTP` (`begin(host, 443, profileId)`) |
+| HTTPS with mutual TLS (mTLS) | `ST87M01TLS` (CA + private key + client cert) + `ST87M01HTTP` |
 | MQTT / NTP / any `Client`-based library | `ST87M01Client` / `ST87M01UDP` |
 | Register on the network and monitor signal | `ST87M01Modem::getCellInfo()` / `getSignal()` + `ST87M01NBIoT` |
 | PSM / eDRX / deep sleep / low-power wake | `ST87M01NBIoT` |
@@ -111,7 +112,7 @@ Each pin defaults to `-1` (= not wired) and each has a polarity flag (`resetActi
 
 HTTPS rides on top of `ST87M01HTTP` — same API, same lifecycle, same workarounds for the modem's HTTP quirks. The only difference is at the socket layer: `AT#SOCKETCREATE` takes an extra `<security_profile_id>` argument that selects a TLS profile already provisioned on the modem, and the subsequent `AT#TCPCONNECT` performs a TLS handshake transparently.
 
-**Phase 1 (current scope): server-authenticated TLS 1.2 with a CA root cert.** Mutual TLS (client cert + private key) and PSK cipher suites are deferred to follow-ups.
+**Server-authenticated TLS** (CA root cert only):
 
 ```cpp
 #include <ST87M01TLS.h>
@@ -120,11 +121,9 @@ HTTPS rides on top of `ST87M01HTTP` — same API, same lifecycle, same workaroun
 ST87M01TLS  tls(modem);
 ST87M01HTTP https(modem);
 
-// Once per device (or once per CA-rotation): provision the cert that DIRECTLY
-// signs your server's leaf into a security profile (1-9). For a typical
-// "server → intermediate → root" chain that is the INTERMEDIATE, not the
-// root — see the no-chain-validation note below. PEM and DER are both
-// accepted.
+// Once per device: provision the cert that DIRECTLY signs your server's leaf
+// into a security profile (1-9). For a "server → intermediate → root" chain
+// that is the INTERMEDIATE, not the root — see chain-validation note below.
 tls.addCaCertPem(/*profileId=*/1, amazonRootCA3Pem);
 tls.saveToNvm();   // optional — persist across power cycle (issues AT#RESET=1)
 
@@ -133,9 +132,23 @@ https.begin("api.example.com", 443, /*secProfile=*/1);
 https.get("/v1/health");
 ```
 
+**Mutual TLS** (client cert + private key for client authentication):
+
+```cpp
+// Provisioning order matters — import key before client cert.
+tls.addCaCertPem(1, caCertPem);                  // CA that signed server's leaf
+tls.addPrivateKeyPem(1, clientKeyPem);            // ECC P-256, PEM or raw 32-byte
+tls.addClientCertPem(1, clientCertPem);           // client cert (modem validates match)
+tls.saveToNvm();                                  // optional
+
+https.begin("iot.example.com", 8443, /*secProfile=*/1);
+```
+
+The modem validates key-certificate correspondence at client cert import time — a mismatch returns `CME ERROR`. Import the private key *before* the client cert. Both PEM and DER forms are accepted for certs; private keys accept PEM (PKCS#8 or SEC1 `EC PRIVATE KEY`) or the raw 32-byte scalar via `addPrivateKey()`.
+
 On TLS failure, `AT#TCPCONNECT` returns `ERROR` and the modem reports a `#HTTPDISC: <tls_error_code>` URC — read it via `https.lastTlsError()`. SNI is taken automatically from the host argument.
 
-Storage limits: up to 9 security profiles (ids 1-9), each holding a CA cert plus future client cert + private key. ITS holds at most 10 files in total across all profiles (TLS app note §3.3).
+Storage limits: up to 9 security profiles (ids 1-9), each holding a CA cert, optionally a client cert + private key. ITS holds at most 10 files in total across all profiles (TLS app note §3.3). A full mTLS profile uses 4 ITS files (header + CA + key + client cert).
 
 **Caveats — documented in the TLS app note (v2.0):**
 
@@ -190,6 +203,8 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **TcpEcho** — raw TCP fetch against `ifconfig.me/ip`.
 - **HttpGet** — HTTP GET via `ST87M01HTTP`, large-body handling.
 - **HttpsGet** — HTTPS GET. Provisions Amazon Root CA 3 (ECDSA P-256) into a TLS profile then opens a secure session to Amazon's `valid.rootca3.demo.amazontrust.com` via `ST87M01TLS` + `ST87M01HTTP::begin(host, 443, profileId)`.
+- **MtlsGet** — mutual TLS (mTLS). Provisions a CA cert, ECC P-256 client private key, and client certificate into a profile, then performs an HTTPS GET with client authentication. Template sketch — replace the placeholder certs/key with your own.
+- **MtlsProvisionTest** — exercises the full mTLS provisioning flow (CA cert → private key → client cert → list → cleanup) without needing a server. Uses embedded test credentials to validate the modem's `AT#TLSKEYADD` and `AT#TLSCERTADD` acceptance on hardware.
 - **PsmSleep** — negotiate PSM with the network, read requested vs. granted timers, optionally enable sleep URCs.
 - **LowPowerLoop** — UDP/NTP heartbeat with both modem PSM and RP2350 light-sleep; demonstrates the `RP2350Power` + `ST87M01NBIoT` coordination pattern with timer + ring-pin wake.
 
@@ -203,7 +218,7 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **`AT#SLEEPIND` and `AT#SLEEPMODE` settings persist only after `AT#RESET=1`.** The `modem.softReset()` helper takes care of the reset and re-probe; the library does not call it automatically.
 - **Only one in-flight AT transaction.** `ST87M01Modem`, `ST87M01Network`, `ST87M01Client`, `ST87M01UDP`, `ST87M01NBIoT`, and `ST87M01HTTP` all share the same AT channel. Do not issue AT commands from a URC handler.
 - **URC-handler budget: 8.** `ST87M01Modem::begin` registers 3 (CEREG, IPRECV, SOCKETCLOSED). `ST87M01HTTP` registers 2 if instantiated; `ST87M01NBIoT` registers 3. All four stacks together = the full 8. HTTPS reuses the same `#HTTPRECV` / `#HTTPDISC` handlers — `ST87M01TLS` registers no URCs of its own.
-- **TLS credentials are RAM-only by default.** `AT#TLSCERTADD` takes effect immediately but doesn't persist across power cycle until `AT#RESET=1`. Call `ST87M01TLS::saveToNvm()` once after provisioning; the modem reboots and you'll need to re-attach.
+- **TLS credentials are RAM-only by default.** `AT#TLSCERTADD` and `AT#TLSKEYADD` take effect immediately but don't persist across power cycle until `AT#RESET=1`. Call `ST87M01TLS::saveToNvm()` once after provisioning; the modem reboots and you'll need to re-attach.
 
 ## Reference
 

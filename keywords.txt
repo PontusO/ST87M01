@@ -99,6 +99,12 @@ securityProfile	KEYWORD2
 lastTlsError	KEYWORD2
 addCaCertDer	KEYWORD2
 addCaCertPem	KEYWORD2
+addClientCertDer	KEYWORD2
+addClientCertPem	KEYWORD2
+addPrivateKey	KEYWORD2
+addPrivateKeyPem	KEYWORD2
+deleteKey	KEYWORD2
+listKeys	KEYWORD2
 deleteCert	KEYWORD2
 deleteProfile	KEYWORD2
 listCerts	KEYWORD2

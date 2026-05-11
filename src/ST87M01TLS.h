@@ -11,18 +11,22 @@
 
 // TLS profile / credential management for the ST87M01.
 //
-// Wraps the AT#TLSCERT* command family. A "security profile" is a numeric
-// slot (1-9) on the modem that holds a CA root cert, optionally a device
-// cert + private key (mutual TLS, Phase 2), and PSK material (Phase 3).
-// Once provisioned, the profile id is passed to ST87M01HTTP::begin(...,
-// secProfile=...) to upgrade an HTTP socket to HTTPS.
+// Wraps the AT#TLSCERT* and AT#TLSKEY* command families. A "security
+// profile" is a numeric slot (1-9) on the modem that holds a CA root
+// cert, optionally a device cert + private key (mutual TLS), and PSK
+// material (Phase 3). Once provisioned, the profile id is passed to
+// ST87M01HTTP::begin(..., secProfile=...) to upgrade an HTTP socket to
+// HTTPS.
 //
-// MVP scope: server-authenticated TLS (CA root cert only). Mutual TLS and
-// PSK are deferred — the Add{ClientCert,PrivateKey,Psk} methods will land
-// in follow-up phases.
+// Supports:
+//   - Server-authenticated TLS: import a CA root cert.
+//   - Mutual TLS (mTLS): import a CA root cert + client certificate +
+//     ECC P-256 private key into the same profile. The modem validates
+//     key-certificate correspondence at import time.
+//   - On-modem key generation and CSR signing are planned for Phase 3.
 //
-// Persistence: AT#TLSCERTADD takes effect immediately but lives in RAM
-// until AT#RESET=1 commits it to NVM. Provision once, then call
+// Persistence: AT#TLSCERTADD / AT#TLSKEYADD take effect immediately but
+// live in RAM until AT#RESET=1 commits to NVM. Provision once, then call
 // saveToNvm() — the modem reboots and network registration must be redone.
 //
 // Important caveats. Some come straight from ST's TLS Application Note
@@ -42,17 +46,22 @@
 //     There are no RSA cipher suites in 1.2. TLS 1.3 suites are
 //     auth-agnostic by name, but in practice the parser below kicks in
 //     before any handshake. (TLS app note Table 6.)
+//   * Private keys must be ECC SECP R1 (P-256) or BrainpoolP256, 32
+//     bytes. The modem internally derives the public key from the
+//     imported private key. (AT manual §14.5.)
+//   * The modem validates key-certificate correspondence when a client
+//     cert is imported — a mismatch returns an error. (TLS app note
+//     §4.3 / §4.4.)
 //
 // Hardware-only (not in the doc):
 //   * The CA-cert parser is ECDSA-only and curve-restricted to P-256 /
 //     Brainpool-P256. RSA roots and ECDSA P-384 roots are rejected
 //     with a bare "+CME ERROR" at AT#TLSCERTADD time, before any
 //     handshake.
-//   * AT#TLSCERTADD requires AT+CFUN=4 (RF off). With RF active the
-//     modem returns a bare "+CME ERROR". This class auto-toggles
-//     AT+CFUN=4 around each upload and restores the prior CFUN level
-//     on the way out; if the modem is already at AT+CFUN=4 the toggle
-//     is skipped.
+//   * AT#TLSCERTADD and AT#TLSKEYADD require AT+CFUN=4 (RF off). With
+//     RF active the modem returns a bare "+CME ERROR". This class
+//     auto-toggles AT+CFUN=4 around each provisioning call and restores
+//     the prior CFUN level on the way out.
 //   * Practical CA-size limit: cert + framing must fit in ~1.5 KB on
 //     the AT line (hex-encoded, so ~750 bytes DER). ECDSA P-256 roots
 //     comfortably fit; RSA-4096 (e.g. ISRG Root X1) is too big and the
@@ -63,13 +72,21 @@
 //     self-hosted P-256 chains. And remember: import the intermediate
 //     that signs the leaf, not the root.
 //
-// Usage:
+// Server-auth usage:
 //     ST87M01TLS tls(modem);
-//     tls.addCaCertPem(/*profileId=*/1, isrgRootX1Pem);
+//     tls.addCaCertPem(1, caCertPem);
 //     tls.saveToNvm();        // optional: persist across power cycle
-//     // ... later, after network is up ...
 //     ST87M01HTTP https(modem);
 //     https.begin("api.example.com", 443, /*secProfile=*/1);
+//
+// Mutual TLS usage:
+//     ST87M01TLS tls(modem);
+//     tls.addCaCertPem(1, caCertPem);
+//     tls.addPrivateKeyDer(1, eccP256Key, 32);
+//     tls.addClientCertPem(1, clientCertPem);
+//     tls.saveToNvm();
+//     ST87M01HTTP https(modem);
+//     https.begin("iot.example.com", 8443, /*secProfile=*/1);
 class ST87M01TLS {
 public:
   // Profile ids 0 is reserved (means "no security"); valid range is 1..9.
@@ -77,7 +94,7 @@ public:
 
   // AT#TLSCERT* <type> values.
   enum CertType : uint8_t {
-    CERT_DEVICE  = 0,    // device cert (mutual TLS, not in MVP)
+    CERT_DEVICE  = 0,    // device / client cert (mutual TLS)
     CERT_CA_ROOT = 1,    // CA root cert (server auth)
     CERT_PSK_ID  = 2,    // PSK identity (PSK suites)
   };
@@ -93,6 +110,8 @@ public:
 
   explicit ST87M01TLS(ST87M01Modem& modem);
 
+  // ---- CA root cert (server auth) ------------------------------------
+
   // Add a CA root certificate to the named profile. The DER form takes the
   // raw X.509 bytes; the PEM forms accept the standard "-----BEGIN
   // CERTIFICATE----- ..." text and decode to DER internally. Effective
@@ -100,8 +119,45 @@ public:
   // must be 1-9 (0 is rejected — that value means "no security" elsewhere
   // in the library).
   bool addCaCertDer(uint8_t profileId, const uint8_t* der, size_t len);
-  bool addCaCertPem(uint8_t profileId, const char* pem);          // null-terminated
+  bool addCaCertPem(uint8_t profileId, const char* pem);
   bool addCaCertPem(uint8_t profileId, const char* pem, size_t pemLen);
+
+  // ---- Client cert + private key (mutual TLS) -----------------------
+
+  // Add a client (device) certificate. Same DER/PEM conventions as CA
+  // certs. The modem validates that the client cert matches a previously
+  // imported private key in the same profile — import the key first, then
+  // the cert.
+  bool addClientCertDer(uint8_t profileId, const uint8_t* der, size_t len);
+  bool addClientCertPem(uint8_t profileId, const char* pem);
+  bool addClientCertPem(uint8_t profileId, const char* pem, size_t pemLen);
+
+  // Import an ECC SECP R1 (P-256) private key. The raw 32-byte scalar is
+  // the only accepted format (not DER-wrapped). The modem stores it in
+  // Flash, internally derives the public key, and will present it during
+  // the TLS handshake when the server requests client authentication.
+  bool addPrivateKey(uint8_t profileId, const uint8_t* key, size_t len);
+
+  // Import an ECC P-256 private key from a PEM-encoded PKCS#8 or SEC1
+  // (EC PRIVATE KEY) block. Extracts the raw 32-byte scalar and calls
+  // addPrivateKey().
+  bool addPrivateKeyPem(uint8_t profileId, const char* pem);
+  bool addPrivateKeyPem(uint8_t profileId, const char* pem, size_t pemLen);
+
+  // Remove the private key from a profile.
+  bool deleteKey(uint8_t profileId);
+
+  struct KeyInfo {
+    uint8_t  profileId;
+    uint8_t  keyType;     // 0 = private key, 1 = PSK
+    uint8_t  curve;       // 0 = SECP_R1, 1 = BrainpoolP256
+    uint16_t bits;        // key size in bits (256 for P-256)
+  };
+
+  // Enumerate provisioned keys. profileId=0 lists across every profile.
+  bool listKeys(uint8_t profileId, KeyInfo* out, size_t maxItems, size_t& outCount);
+
+  // ---- Removal / management -----------------------------------------
 
   // Remove a single credential or wipe every credential in the profile.
   // Note: the modem reports these as "takes effect after reboot" — call
@@ -125,9 +181,17 @@ private:
   ST87M01Modem& _modem;
 
   bool uploadDer(uint8_t profileId, uint8_t type, const uint8_t* der, size_t len);
+  bool uploadKey(uint8_t profileId, const uint8_t* key, size_t len);
 
   // Decode a PEM block (base64 between BEGIN/END markers, ignoring
   // whitespace) into DER bytes. Returns the number of DER bytes written,
   // or 0 on malformed input or insufficient buffer.
   static size_t pemToDer(const char* pem, size_t pemLen, uint8_t* out, size_t outMax);
+
+  // Extract the raw 32-byte ECC P-256 private key scalar from a
+  // DER-encoded PKCS#8 (SEQUENCE > SEQUENCE > OID > OCTET STRING >
+  // SEQUENCE > INTEGER) or SEC1 (EC PRIVATE KEY: SEQUENCE > INTEGER >
+  // OCTET STRING) structure. Returns 32 on success, 0 on failure.
+  static size_t extractEcKeyFromDer(const uint8_t* der, size_t derLen,
+                                    uint8_t* out, size_t outMax);
 };

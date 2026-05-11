@@ -58,9 +58,6 @@ bool ST87M01TLS::addCaCertPem(uint8_t profileId, const char* pem, size_t pemLen)
   if (profileId > MAX_PROFILE_ID) return false;
   if (!pem || !pemLen) return false;
 
-  // Decoded DER is at most 3/4 of the PEM byte count (and base64 padding
-  // makes it slightly less). Allocating pemLen is always safe and avoids a
-  // second pass to size the buffer.
   uint8_t* der = static_cast<uint8_t*>(malloc(pemLen));
   if (!der) return false;
 
@@ -68,6 +65,65 @@ bool ST87M01TLS::addCaCertPem(uint8_t profileId, const char* pem, size_t pemLen)
   bool ok = (derLen > 0) && uploadDer(profileId, CERT_CA_ROOT, der, derLen);
   free(der);
   return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Client cert provisioning (mutual TLS)
+// ---------------------------------------------------------------------------
+bool ST87M01TLS::addClientCertDer(uint8_t profileId, const uint8_t* der, size_t len) {
+  if (profileId > MAX_PROFILE_ID) return false;
+  if (!der || !len) return false;
+  return uploadDer(profileId, CERT_DEVICE, der, len);
+}
+
+bool ST87M01TLS::addClientCertPem(uint8_t profileId, const char* pem) {
+  if (!pem) return false;
+  return addClientCertPem(profileId, pem, strlen(pem));
+}
+
+bool ST87M01TLS::addClientCertPem(uint8_t profileId, const char* pem, size_t pemLen) {
+  if (profileId > MAX_PROFILE_ID) return false;
+  if (!pem || !pemLen) return false;
+
+  uint8_t* der = static_cast<uint8_t*>(malloc(pemLen));
+  if (!der) return false;
+
+  size_t derLen = pemToDer(pem, pemLen, der, pemLen);
+  bool ok = (derLen > 0) && uploadDer(profileId, CERT_DEVICE, der, derLen);
+  free(der);
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Private key provisioning (mutual TLS)
+// ---------------------------------------------------------------------------
+bool ST87M01TLS::addPrivateKey(uint8_t profileId, const uint8_t* key, size_t len) {
+  if (profileId > MAX_PROFILE_ID) return false;
+  if (!key || len != 32) return false;
+  return uploadKey(profileId, key, len);
+}
+
+bool ST87M01TLS::addPrivateKeyPem(uint8_t profileId, const char* pem) {
+  if (!pem) return false;
+  return addPrivateKeyPem(profileId, pem, strlen(pem));
+}
+
+bool ST87M01TLS::addPrivateKeyPem(uint8_t profileId, const char* pem, size_t pemLen) {
+  if (profileId > MAX_PROFILE_ID) return false;
+  if (!pem || !pemLen) return false;
+
+  uint8_t* der = static_cast<uint8_t*>(malloc(pemLen));
+  if (!der) return false;
+
+  size_t derLen = pemToDer(pem, pemLen, der, pemLen);
+  if (derLen == 0) { free(der); return false; }
+
+  uint8_t raw[32];
+  size_t rawLen = extractEcKeyFromDer(der, derLen, raw, sizeof(raw));
+  free(der);
+
+  if (rawLen != 32) return false;
+  return uploadKey(profileId, raw, rawLen);
 }
 
 bool ST87M01TLS::uploadDer(uint8_t profileId, uint8_t type,
@@ -104,6 +160,109 @@ bool ST87M01TLS::uploadDer(uint8_t profileId, uint8_t type,
   return _modem.at().expectOK(10000);
 }
 
+bool ST87M01TLS::uploadKey(uint8_t profileId, const uint8_t* key, size_t len) {
+  // AT#TLSKEYADD=<sec_id>,<type>,<storage>,<data_flag>,<data_length>,<data>
+  //
+  // type = 128: asymmetric + private + SECP_R1 + hex-string output (bit7).
+  // storage = 2: Flash.
+  // data_flag bitmap (AT manual §14.5):
+  //   bit0: 0=key content follows, 1=key generated internally
+  //   bit1: 0=no public key in response, 1=return derived public key
+  //   bit2: 0=DER format, 1=raw binary scalar
+  //
+  // We use data_flag=4: bit0=0 (import), bit1=0 (no echo), bit2=1 (raw).
+  // The TLS app note §4.3 uses data_flag=2 with DER-wrapped keys; we send
+  // the raw 32-byte scalar instead. The modem derives the public key
+  // internally regardless of bit1 — that bit only controls the AT response.
+  CfunGuard rf(_modem);
+  if (!rf.ok) return false;
+
+  char prefix[64];
+  snprintf(prefix, sizeof(prefix), "AT#TLSKEYADD=%u,128,2,4,%u,",
+           profileId, static_cast<unsigned>(len));
+  _modem.at().beginCommand(prefix);
+  _modem.at().writeHex(key, len);
+  _modem.at().endCommand();
+
+  return _modem.at().expectOK(10000);
+}
+
+// ---------------------------------------------------------------------------
+// Key management
+// ---------------------------------------------------------------------------
+bool ST87M01TLS::deleteKey(uint8_t profileId) {
+  if (profileId > MAX_PROFILE_ID) return false;
+  CfunGuard rf(_modem);
+  if (!rf.ok) return false;
+  _modem.at().sendf("AT#TLSKEYDEL=%u", profileId);
+  return _modem.at().expectOK(5000);
+}
+
+bool ST87M01TLS::listKeys(uint8_t profileId, KeyInfo* out, size_t maxItems,
+                          size_t& outCount) {
+  outCount = 0;
+  if (!out && maxItems) return false;
+
+  if (profileId == 0) {
+    _modem.at().sendf("AT#TLSKEYLIST");
+  } else {
+    _modem.at().sendf("AT#TLSKEYLIST=%u", profileId);
+  }
+
+  // Response: #TLSKEYLIST: <sec_id>,<type>,<cipher>,<algo>,<size>
+  // type: 0=private key, 1=PSK
+  // cipher: 0=ECC (when type=0)
+  // algo: 0=SECP_R1, 1=BrainpoolP256
+  // size: bits
+  String line;
+  unsigned long deadline = millis() + 5000;
+  while (millis() < deadline) {
+    if (!_modem.at().readLine(line, 5000)) return false;
+    if (!line.length()) continue;
+    if (line == "OK") return true;
+    if (line.startsWith("ERROR") || line.startsWith("+CME ERROR")) return false;
+    if (!line.startsWith("#TLSKEYLIST:")) continue;
+
+    int colon = line.indexOf(':');
+    if (colon < 0) continue;
+    int pos = colon + 1;
+    while (pos < (int)line.length() && line.charAt(pos) == ' ') ++pos;
+
+    // Parse comma-separated integer fields
+    int comma = line.indexOf(',', pos);
+    if (comma < 0) continue;
+    uint8_t fSec = static_cast<uint8_t>(line.substring(pos, comma).toInt());
+    pos = comma + 1;
+
+    comma = line.indexOf(',', pos);
+    if (comma < 0) continue;
+    uint8_t fType = static_cast<uint8_t>(line.substring(pos, comma).toInt());
+    pos = comma + 1;
+
+    comma = line.indexOf(',', pos);
+    if (comma < 0) continue;
+    // cipher field — skip for now
+    pos = comma + 1;
+
+    comma = line.indexOf(',', pos);
+    if (comma < 0) continue;
+    uint8_t fAlgo = static_cast<uint8_t>(line.substring(pos, comma).toInt());
+    pos = comma + 1;
+
+    uint16_t fSize = static_cast<uint16_t>(line.substring(pos).toInt());
+
+    if (outCount < maxItems) {
+      KeyInfo& ki = out[outCount];
+      ki.profileId = fSec;
+      ki.keyType   = fType;
+      ki.curve     = fAlgo;
+      ki.bits      = fSize;
+    }
+    ++outCount;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Removal
 // ---------------------------------------------------------------------------
@@ -138,10 +297,8 @@ bool ST87M01TLS::listCerts(uint8_t profileId, CertInfo* out, size_t maxItems,
     _modem.at().sendf("AT#TLSCERTLIST=%u", profileId);
   }
 
-  // Observed response format (the AT manual page 188 documents a different,
-  // simpler form — the firmware actually emits this richer one):
-  //   #TLSCERTLIST: <sec_id>,<type>,"<issuer>","<subject>","<not_before>","<not_after>"
-  // Multiple lines, then OK. Quoted fields can contain commas in principle.
+  // Firmware response (unquoted, subject before issuer — differs from manual):
+  //   #TLSCERTLIST: <sec_id>,<type>,<subject>,<issuer>,<not_before>,<not_after>
   String line;
   unsigned long deadline = millis() + 5000;
   while (millis() < deadline) {
@@ -168,24 +325,35 @@ bool ST87M01TLS::listCerts(uint8_t profileId, CertInfo* out, size_t maxItems,
     uint8_t fType = static_cast<uint8_t>(line.substring(pos, comma).toInt());
     pos = comma + 1;
 
-    // Helper: read a "..."-quoted field starting at pos. Advances pos past
-    // the closing quote (and the following comma, if any). Returns "" if
-    // the field is malformed.
-    auto readQuoted = [&](String& dst) -> bool {
-      if (pos >= (int)line.length() || line.charAt(pos) != '"') return false;
-      int end = line.indexOf('"', pos + 1);
-      if (end < 0) return false;
-      dst = line.substring(pos + 1, end);
-      pos = end + 1;
+    // Helper: read a string field starting at pos — handles both quoted
+    // ("...") and unquoted (bare comma-separated) forms. The AT manual
+    // documents quotes but firmware v3.1 emits unquoted fields.
+    auto readField = [&](String& dst) -> bool {
+      if (pos >= (int)line.length()) return false;
+      if (line.charAt(pos) == '"') {
+        int end = line.indexOf('"', pos + 1);
+        if (end < 0) return false;
+        dst = line.substring(pos + 1, end);
+        pos = end + 1;
+      } else {
+        int comma = line.indexOf(',', pos);
+        if (comma < 0) {
+          dst = line.substring(pos);
+          pos = line.length();
+        } else {
+          dst = line.substring(pos, comma);
+          pos = comma;
+        }
+      }
       if (pos < (int)line.length() && line.charAt(pos) == ',') ++pos;
       return true;
     };
 
     String issuer, subject, notBefore, notAfter;
-    if (!readQuoted(issuer))    continue;
-    if (!readQuoted(subject))   continue;
-    if (!readQuoted(notBefore)) continue;
-    if (!readQuoted(notAfter))  continue;
+    if (!readField(subject))   continue;
+    if (!readField(issuer))    continue;
+    if (!readField(notBefore)) continue;
+    if (!readField(notAfter))  continue;
 
     if (outCount < maxItems) {
       CertInfo& ci = out[outCount];
@@ -275,4 +443,46 @@ size_t ST87M01TLS::pemToDer(const char* pem, size_t pemLen,
   }
 
   return outLen;
+}
+
+// ---------------------------------------------------------------------------
+// DER private key → raw 32-byte ECC scalar
+// ---------------------------------------------------------------------------
+// Handles two PEM/DER encodings:
+//
+//   SEC1 (-----BEGIN EC PRIVATE KEY-----):
+//     SEQUENCE {
+//       INTEGER 1                    -- version
+//       OCTET STRING (32 bytes)      -- private key scalar  ← we want this
+//       [0] EXPLICIT OID ...         -- named curve (optional)
+//       [1] EXPLICIT BIT STRING ...  -- public key (optional)
+//     }
+//
+//   PKCS#8 (-----BEGIN PRIVATE KEY-----):
+//     SEQUENCE {
+//       INTEGER 0                    -- version
+//       SEQUENCE { OID ... }         -- algorithm identifier
+//       OCTET STRING {               -- wraps SEC1 payload
+//         SEQUENCE {
+//           INTEGER 1
+//           OCTET STRING (32 bytes)  ← we want this
+//           ...
+//         }
+//       }
+//     }
+//
+// We do a minimal walk: find the first OCTET STRING (tag 0x04) whose
+// length is exactly 32. In practice, the first such octet in both SEC1
+// and PKCS#8 structures IS the private key scalar.
+size_t ST87M01TLS::extractEcKeyFromDer(const uint8_t* der, size_t derLen,
+                                       uint8_t* out, size_t outMax) {
+  if (!der || !out || outMax < 32) return 0;
+
+  for (size_t i = 0; i + 33 <= derLen; ++i) {
+    if (der[i] == 0x04 && der[i + 1] == 0x20) {
+      memcpy(out, &der[i + 2], 32);
+      return 32;
+    }
+  }
+  return 0;
 }
