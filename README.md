@@ -14,7 +14,7 @@ Validated on real hardware against 1NCE NB-IoT as of 2026-04-24:
 - DNS resolution (`AT#DNS`) and ping (`AT#IPPING`).
 - PSM negotiated with the network; requested and granted timer values are both readable.
 
-HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and hardware-validated against `valid.rootca3.demo.amazontrust.com` over a 1NCE NB-IoT link. Mutual TLS (client certificate + private key) is implemented — see [HTTPS / TLS](#https--tls) below. PSK cipher suites are not yet exposed.
+HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and hardware-validated against `valid.rootca3.demo.amazontrust.com` over a 1NCE NB-IoT link. Mutual TLS (client certificate authentication) is implemented and hardware-validated end-to-end — see [HTTPS / TLS](#https--tls) below. PSK cipher suites are not yet exposed.
 
 Known limits and workarounds are covered in [Known quirks](#known-quirks) below. All AT commands are cross-checked against the ST87MXX UM AT Commands manual v3.1 (2025-10-06).
 
@@ -203,7 +203,7 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **TcpEcho** — raw TCP fetch against `ifconfig.me/ip`.
 - **HttpGet** — HTTP GET via `ST87M01HTTP`, large-body handling.
 - **HttpsGet** — HTTPS GET. Provisions Amazon Root CA 3 (ECDSA P-256) into a TLS profile then opens a secure session to Amazon's `valid.rootca3.demo.amazontrust.com` via `ST87M01TLS` + `ST87M01HTTP::begin(host, 443, profileId)`.
-- **MtlsGet** — mutual TLS (mTLS). Provisions a CA cert, ECC P-256 client private key, and client certificate into a profile, then performs an HTTPS GET with client authentication. Template sketch — replace the placeholder certs/key with your own.
+- **MtlsGet** — mutual TLS (mTLS). Provisions a CA cert, ECC P-256 client private key, and client certificate into a profile, then performs an HTTPS GET with client authentication. Hardware-validated end-to-end against a Python mTLS server with `CERT_REQUIRED`. Template sketch — replace the placeholder certs/key with your own.
 - **MtlsProvisionTest** — exercises the full mTLS provisioning flow (CA cert → private key → client cert → list → cleanup) without needing a server. Uses embedded test credentials to validate the modem's `AT#TLSKEYADD` and `AT#TLSCERTADD` acceptance on hardware.
 - **PsmSleep** — negotiate PSM with the network, read requested vs. granted timers, optionally enable sleep URCs.
 - **LowPowerLoop** — UDP/NTP heartbeat with both modem PSM and RP2350 light-sleep; demonstrates the `RP2350Power` + `ST87M01NBIoT` coordination pattern with timer + ring-pin wake.

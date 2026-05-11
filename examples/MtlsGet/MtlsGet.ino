@@ -64,7 +64,7 @@
 
 // ---- User configuration ------------------------------------------------
 static const char* APN  = "iot.1nce.net";
-static const char* HOST = "mtls.example.com";      // REPLACE with your mTLS server
+static const char* HOST = "your-server.example.com";
 static const char* PATH_ = "/";
 static constexpr uint16_t PORT = 8443;
 
@@ -81,20 +81,20 @@ static constexpr bool AT_DEBUG = false;
 // CA certificate that signed your server's leaf cert (must be ECDSA P-256).
 static const char CA_CERT_PEM[] =
   "-----BEGIN CERTIFICATE-----\n"
-  "REPLACE_WITH_YOUR_CA_CERT_PEM\n"
+  "REPLACE_WITH_YOUR_CA_CERT_BASE64\n"
   "-----END CERTIFICATE-----\n";
 
-// Client private key — PEM-encoded PKCS#8 or SEC1 (EC PRIVATE KEY).
+// Client private key — PEM-encoded SEC1 (EC PRIVATE KEY).
 // addPrivateKeyPem() extracts the raw 32-byte scalar automatically.
 static const char CLIENT_KEY_PEM[] =
   "-----BEGIN EC PRIVATE KEY-----\n"
-  "REPLACE_WITH_YOUR_CLIENT_KEY_PEM\n"
+  "REPLACE_WITH_YOUR_CLIENT_KEY_BASE64\n"
   "-----END EC PRIVATE KEY-----\n";
 
 // Client certificate signed by a CA the server trusts (ECDSA P-256).
 static const char CLIENT_CERT_PEM[] =
   "-----BEGIN CERTIFICATE-----\n"
-  "REPLACE_WITH_YOUR_CLIENT_CERT_PEM\n"
+  "REPLACE_WITH_YOUR_CLIENT_CERT_BASE64\n"
   "-----END CERTIFICATE-----\n";
 
 // ---- Global objects ----------------------------------------------------

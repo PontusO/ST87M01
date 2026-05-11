@@ -82,7 +82,7 @@
 // Mutual TLS usage:
 //     ST87M01TLS tls(modem);
 //     tls.addCaCertPem(1, caCertPem);
-//     tls.addPrivateKeyDer(1, eccP256Key, 32);
+//     tls.addPrivateKey(1, eccP256Key, 32);
 //     tls.addClientCertPem(1, clientCertPem);
 //     tls.saveToNvm();
 //     ST87M01HTTP https(modem);
