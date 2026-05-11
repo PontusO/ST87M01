@@ -77,9 +77,13 @@ public:
   size_t socketRxPending(uint8_t socketId) const;
 
   // Cumulative number of RX bytes that were dropped because the caller's
-  // buffer was smaller than what the modem delivered in a single AT#IPREAD
-  // transaction. Non-zero means the socket's data stream is incomplete and
-  // should be treated as corrupted. Reset on the next createSocket() call.
+  // per-call buffer was smaller than a single IP frame returned by
+  // AT#IPREAD (frame size capped by AT#IPPARAMS max_ip_frame_size, default
+  // 1500). Multi-frame responses are NOT a source of drops — successive
+  // #IPRECV URCs queue them up and the adapter loop drains frame-by-frame.
+  // Non-zero means at least one frame was larger than the caller's chunk
+  // size; that frame's stream is corrupted but later frames are still
+  // intact. Reset on the next createSocket() call.
   size_t socketRxDropped(uint8_t socketId) const;
 
   ST87M01AT& at() { return _at; }

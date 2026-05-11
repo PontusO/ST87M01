@@ -57,11 +57,25 @@ int ST87M01Client::read() {
 }
 
 int ST87M01Client::read(uint8_t* buf, size_t size) {
-  if (available() <= 0) return -1;
-  size_t n = min(size, _rxLen - _rxPos);
-  memcpy(buf, &_rxBuf[_rxPos], n);
-  _rxPos += n;
-  return static_cast<int>(n);
+  if (!buf || !size) return 0;
+  // AT#IPREAD returns one IP frame per call, so a single read() may need to
+  // pull multiple frames to satisfy the caller. Loop while there's room in
+  // the caller's buffer and the modem still reports bytes pending. Stop on
+  // first frame that fails to land — caller can retry on the next tick.
+  size_t total = 0;
+  while (total < size) {
+    if (_rxPos >= _rxLen) {
+      _modem.poll();
+      if (_modem.socketRxPending(_socketId) == 0) break;
+      if (!fillRx()) break;
+    }
+    size_t avail = _rxLen - _rxPos;
+    size_t n = (size - total < avail) ? (size - total) : avail;
+    memcpy(buf + total, &_rxBuf[_rxPos], n);
+    _rxPos += n;
+    total += n;
+  }
+  return total > 0 ? static_cast<int>(total) : -1;
 }
 
 int ST87M01Client::peek() {

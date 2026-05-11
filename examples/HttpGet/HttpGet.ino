@@ -12,14 +12,14 @@
   ST87M01HTTP library class). Prints the status code, the server's
   response headers, and the full body.
 
-  Why the native HTTP client instead of raw TCP: the modem's AT#IPREAD
-  is a one-shot transaction — when it's called, the modem dumps the
-  entire pending RX buffer over the UART in one go. If the response is
-  larger than the library's local buffer, the tail is silently drained
-  and lost (see ST87M01Client::droppedBytes() / socketRxDropped()).
-  The HTTP stack, by contrast, delivers the response as discrete chunks
-  via #HTTPRECV URCs, and AT#HTTPREAD pulls exactly one chunk per call,
-  so arbitrary-sized responses work correctly.
+  Why the native HTTP client instead of raw TCP: raw TCP via
+  ST87M01Client now handles arbitrary-sized responses just fine — it
+  drains successive #IPRECV-announced IP frames via per-frame AT#IPREAD.
+  The native HTTP stack is still preferred here because the modem also
+  parses status lines, headers, and Transfer-Encoding: chunked for you;
+  using raw TCP for HTTP means writing your own request line, Host
+  header, and chunked-body parser. For an example of raw TCP doing an
+  HTTP fetch by hand, see the RawHttpGet sketch.
 
   Exercises: AT#DNS, AT#SOCKETCREATE, AT#TCPCONNECT, AT#HTTPSTART,
   AT#HTTPMETHOD, AT#HTTPSEND, #HTTPRECV URC dispatch, AT#HTTPREAD,

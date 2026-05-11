@@ -371,41 +371,72 @@ bool ST87M01Modem::ping(uint8_t cid, const char* hostOrIp) {
 bool ST87M01Modem::createSocket(uint8_t cid, bool tcp, uint8_t& socketId,
                                 uint16_t localPort, uint8_t secProfile,
                                 uint8_t frameRecvUrc) {
-  String line;
   // ip_version=0 (IPv4), type="TCP"/"UDP", local_port (empty = random),
   // send_timeout=10s, receive_timeout=10s.
   // frameRecvUrc: 2 = fires #IPRECV with length (for Client/UDP),
   //               0 = disabled (for MQTT which uses its own #MQTRECV URC).
   // 8th parameter <security_profile_id> is omitted for plain sockets so the
   // AT line stays byte-identical to the pre-TLS behavior.
-  if (secProfile) {
-    if (localPort) {
-      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,%u,%u",
-                cid, tcp ? "TCP" : "UDP", localPort, frameRecvUrc, secProfile);
+  //
+  // Retry: the modem retains socket state across host MCU resets, so a
+  // post-reboot SOCKETCREATE often hits CME 2159 ("socket in use") even
+  // though the host has nothing open. On 2159, close any slot we don't
+  // think is in use (preserving any sockets created earlier in this
+  // process) and retry once.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    if (secProfile) {
+      if (localPort) {
+        _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,%u,%u",
+                  cid, tcp ? "TCP" : "UDP", localPort, frameRecvUrc, secProfile);
+      } else {
+        _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,%u,%u",
+                  cid, tcp ? "TCP" : "UDP", frameRecvUrc, secProfile);
+      }
+    } else if (localPort) {
+      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,%u",
+                cid, tcp ? "TCP" : "UDP", localPort, frameRecvUrc);
+    } else if (frameRecvUrc) {
+      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,%u",
+                cid, tcp ? "TCP" : "UDP", frameRecvUrc);
     } else {
-      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,%u,%u",
-                cid, tcp ? "TCP" : "UDP", frameRecvUrc, secProfile);
+      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10",
+                cid, tcp ? "TCP" : "UDP");
     }
-  } else if (localPort) {
-    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,%u",
-              cid, tcp ? "TCP" : "UDP", localPort, frameRecvUrc);
-  } else if (frameRecvUrc) {
-    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,%u",
-              cid, tcp ? "TCP" : "UDP", frameRecvUrc);
-  } else {
-    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10",
-              cid, tcp ? "TCP" : "UDP");
-  }
-  if (!_at.waitLineStartsWith("#SOCKETCREATE:", line, 5000)) return false;
-  int colon = line.indexOf(':');
-  socketId = static_cast<uint8_t>(line.substring(colon + 1).toInt());
-  if (!_at.expectOK()) return false;
 
-  if (socketId < MAX_SOCKETS) {
-    _sockets[socketId] = SocketSlot{};
-    _sockets[socketId].inUse = true;
+    String line;
+    if (_at.waitLineStartsWith("#SOCKETCREATE:", line, 5000)) {
+      int colon = line.indexOf(':');
+      socketId = static_cast<uint8_t>(line.substring(colon + 1).toInt());
+      if (!_at.expectOK()) return false;
+      if (socketId < MAX_SOCKETS) {
+        _sockets[socketId] = SocketSlot{};
+        _sockets[socketId].inUse = true;
+      }
+      return true;
+    }
+
+    if (attempt == 0 && _at.lastCmeError() == 2159) {
+      // CME 2159 ("socket in use") after host reset usually means the modem
+      // is still in MQTT or HTTP engine mode from a previous sketch — those
+      // engines reserve a socket the raw SOCKETCLOSE path can't release.
+      // Disarm both engines first (errors ignored — they're harmless if the
+      // engine wasn't active), then sweep any IP sockets we don't think we
+      // own.
+      _at.sendf("AT#MQTTDISC=%u", cid);
+      _at.expectOK(5000);
+      _at.sendf("AT#HTTPSTOP");
+      _at.expectOK(5000);
+      for (uint8_t i = 0; i < MAX_SOCKETS; ++i) {
+        if (!_sockets[i].inUse) {
+          _at.sendf("AT#SOCKETCLOSE=%u,%u", cid, i);
+          _at.expectOK(5000);
+        }
+      }
+      continue;
+    }
+    return false;
   }
-  return true;
+  return false;
 }
 
 bool ST87M01Modem::connectTcp(uint8_t cid, uint8_t socketId, const char* ip, uint16_t port) {
@@ -464,21 +495,24 @@ int ST87M01Modem::readSocket(uint8_t cid, uint8_t socketId, uint8_t* data, size_
     declared = static_cast<size_t>(rest.substring(c2 + 1).toInt());
   }
   if (declared == 0) {
-    // Still need to consume OK.
+    // Empty frame — still need to consume OK. Don't touch rxPending: a later
+    // #IPRECV URC may have already added to it.
     _at.expectOK(5000);
-    if (socketId < MAX_SOCKETS) _sockets[socketId].rxPending = 0;
     return 0;
   }
 
   size_t toCopy = (declared < maxLen) ? declared : maxLen;
   size_t got = _at.readBytes(data, toCopy, 30000);
 
-  // AT#IPREAD is one-shot: the modem has already queued `declared` bytes on
-  // the UART before we see the #IPREAD: header, so any excess beyond `maxLen`
-  // MUST be drained — otherwise stray bytes corrupt the next AT exchange.
-  // But dropping data silently is dangerous (the caller thinks they got a
-  // complete stream), so record the drop count on the socket slot and shout
-  // about it on the debug stream. The caller can query via socketRxDropped().
+  // AT#IPREAD returns one IP frame per call (per ST: AT#IPPARAMS
+  // max_ip_frame_size, default 1500 B). The modem queued `declared` bytes on
+  // the UART before we saw the #IPREAD: header, so if the caller's buffer
+  // can't hold the full frame the excess MUST be drained — leaving it
+  // stranded would corrupt the next AT exchange. The drop is per-frame, not
+  // per-response: if more frames are pending the next #IPRECV URC + IPREAD
+  // call still delivers them. rxDropped flags "caller's buffer is too small
+  // for one frame" — bump max_ip_frame_size (AT#IPPARAMS) down or grow the
+  // adapter's per-read chunk.
   size_t overflow = (declared > got) ? (declared - got) : 0;
   size_t dropped = 0;
   while (overflow--) {
@@ -491,9 +525,9 @@ int ST87M01Modem::readSocket(uint8_t cid, uint8_t socketId, uint8_t* data, size_
   }
   if (dropped) {
     if (Stream* dbg = _at.debugStream()) {
-      dbg->print(F("!!! readSocket truncated: "));
+      dbg->print(F("!!! readSocket frame overflow: "));
       dbg->print(dropped);
-      dbg->print(F(" bytes dropped (declared="));
+      dbg->print(F(" bytes dropped (frame="));
       dbg->print(declared);
       dbg->print(F(", buffer="));
       dbg->print(maxLen);
@@ -501,13 +535,13 @@ int ST87M01Modem::readSocket(uint8_t cid, uint8_t socketId, uint8_t* data, size_
     }
   }
 
-  if (!_at.expectOK(5000)) {
-    if (socketId < MAX_SOCKETS) _sockets[socketId].rxPending = 0;
-    return static_cast<int>(got);
-  }
+  _at.expectOK(5000);
 
   if (socketId < MAX_SOCKETS) {
-    _sockets[socketId].rxPending = 0;
+    // Decrement by the frame the modem just shipped, not by `got`: even
+    // dropped bytes have left the modem's socket buffer.
+    size_t& pending = _sockets[socketId].rxPending;
+    pending = (pending > declared) ? (pending - declared) : 0;
   }
   return static_cast<int>(got);
 }
@@ -555,8 +589,14 @@ void ST87M01Modem::onIpRecvUrc(const String& line, void* ctx) {
   int sockId = rest.substring(c1 + 1, (c2 >= 0) ? c2 : rest.length()).toInt();
   size_t len = (c2 >= 0) ? rest.substring(c2 + 1).toInt() : 0;
 
-  if (sockId >= 0 && sockId < static_cast<int>(MAX_SOCKETS)) {
-    self->_sockets[sockId].rxPending = len ? len : self->_sockets[sockId].rxPending + 1;
+  // #IPRECV is per-frame: each URC announces one IP frame. Accumulate so
+  // multi-frame deliveries leave the full pending byte count visible to the
+  // adapter's read loop. When len is absent (shouldn't happen with
+  // frameRecvUrc=2, but be defensive) leave the counter alone — the adapter
+  // will still issue AT#IPREAD once and learn the true frame size from
+  // #IPREAD's own length field.
+  if (sockId >= 0 && sockId < static_cast<int>(MAX_SOCKETS) && len > 0) {
+    self->_sockets[sockId].rxPending += len;
   }
 }
 

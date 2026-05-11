@@ -19,9 +19,11 @@ public:
   void setCid(uint8_t cid) { _cid = cid; }
   uint8_t cid() const { return _cid ? _cid : _modem.defaultCid(); }
 
-  // Cumulative count of RX bytes silently dropped because a single AT#IPREAD
-  // delivered more than the internal RX buffer could hold. Non-zero means
-  // some datagrams were truncated. Zeroed on begin()/stop().
+  // Cumulative count of RX bytes dropped because a UDP datagram was larger
+  // than the internal RX buffer (sized to the documented AT#IPPARAMS
+  // max_ip_frame_size ceiling of 1600 bytes). Should stay at zero under
+  // normal operation; non-zero means at least one datagram was oversized
+  // and is unrecoverable. Zeroed on begin()/stop().
   size_t droppedBytes() const { return _modem.socketRxDropped(_socketId); }
 
   uint8_t begin(uint16_t port) override;
@@ -45,7 +47,11 @@ public:
   uint16_t remotePort() override { return 0; }
 
 private:
-  static constexpr size_t BUF_SIZE = 1500;
+  // Sized to the documented upper bound of AT#IPPARAMS max_ip_frame_size
+  // (per ST: 512..1600 bytes). For UDP each AT#IPREAD frame is one
+  // datagram; if a datagram exceeds this it gets truncated with no
+  // recovery path (unlike TCP where multi-frame drain is possible).
+  static constexpr size_t BUF_SIZE = 1600;
 
   ST87M01Modem& _modem;
   uint8_t _cid;

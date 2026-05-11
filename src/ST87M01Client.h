@@ -32,14 +32,20 @@ public:
   void setCid(uint8_t cid) { _cid = cid; }
   uint8_t cid() const { return _cid ? _cid : _modem.defaultCid(); }
 
-  // Cumulative count of RX bytes that were silently dropped because a single
-  // AT#IPREAD delivered more than the internal RX buffer could hold. Non-zero
-  // after a session means the received stream is truncated — treat whatever
-  // was read as incomplete. Zeroed on connect/stop.
+  // Cumulative count of RX bytes that were dropped because a single
+  // AT#IPREAD frame was larger than the internal RX buffer. The buffer is
+  // sized to the documented upper bound of AT#IPPARAMS max_ip_frame_size
+  // (1600 bytes), so this should stay at zero. Multi-frame responses are
+  // NOT a source of drops — read() loops through them via #IPRECV-driven
+  // refills. Zeroed on connect/stop.
   size_t droppedBytes() const { return _modem.socketRxDropped(_socketId); }
 
 private:
-  static constexpr size_t RX_BUF_SIZE = 1500;
+  // Sized to the documented upper bound of AT#IPPARAMS max_ip_frame_size
+  // (per ST: 512..1600 bytes). The library sets 1514 in setIpStack, but
+  // empirically the modem can deliver frames up to ~1540 bytes regardless,
+  // so cover the full documented ceiling.
+  static constexpr size_t RX_BUF_SIZE = 1600;
 
   ST87M01Modem& _modem;
   uint8_t _cid;
