@@ -13,8 +13,11 @@ Validated on real hardware against 1NCE NB-IoT as of 2026-04-24:
 - HTTP GET for arbitrary response sizes via `ST87M01HTTP` (tested with a 1457-byte body over multiple `AT#HTTPREAD` chunks).
 - DNS resolution (`AT#DNS`) and ping (`AT#IPPING`).
 - PSM negotiated with the network; requested and granted timer values are both readable.
+- Native modem MQTT via `ST87M01MQTT` (2026-05-11): connect, subscribe, publish round-trip against `broker.hivemq.com:1883`. Survives the modem's silent-sleep / wake cycles between publishes — wake is handled transparently by an unconditional 2-AT probe in the `ST87M01AT` pre-send hook (the modem firmware loses the first AT after a sleep period; `#SLEEP`/`#WAKEUP` URCs are too unreliable to use as state signals).
 
 HTTPS support (server-authenticated TLS 1.2 via `ST87M01HTTP` + `ST87M01TLS`) is implemented and hardware-validated against `valid.rootca3.demo.amazontrust.com` over a 1NCE NB-IoT link. Mutual TLS (client certificate authentication) is implemented and hardware-validated end-to-end — see [HTTPS / TLS](#https--tls) below. PSK cipher suites are not yet exposed.
+
+Native modem MQTT (`ST87M01MQTT`) wraps the modem's `AT#MQTT*` command family — see [MQTT](#mqtt) below.
 
 Known limits and workarounds are covered in [Known quirks](#known-quirks) below. All AT commands are cross-checked against the ST87MXX UM AT Commands manual v3.1 (2025-10-06).
 
@@ -64,7 +67,7 @@ void loop() {
 
 Five layers, bottom-up. Each layer holds a reference to the one below it — nothing owns a copy.
 
-1. **`ST87M01AT`** — AT transport over a `Stream&` (normally a `HardwareSerial`). Handles line framing, `OK` / `ERROR` / `+CME ERROR:` final results, and a URC (unsolicited result code) dispatcher that can fan out to up to 8 prefix-matched callbacks.
+1. **`ST87M01AT`** — AT transport over a `Stream&` (normally a `HardwareSerial`). Handles line framing, `OK` / `ERROR` / `+CME ERROR:` final results, and a URC (unsolicited result code) dispatcher that can fan out to up to 12 prefix-matched callbacks. Also exposes a pre-send hook that runs before every AT command; `ST87M01Modem::begin()` installs one to handle modem wake-from-sleep transparently for the whole stack.
 
 2. **`ST87M01Modem`** — Semantic modem API on top of `ST87M01AT`. Identity (model, IMSI, operator), attach and PDP context control, IP stack activation (`AT#IPCFG`), registration and signal (`AT+CEREG` / `AT+CESQ`), DNS/ping, and the socket primitives used by `ST87M01Client` and `ST87M01UDP`. Tracks up to 3 socket slots (one TCP + two UDP per manual). You normally keep one `ST87M01Modem` per sketch and call `modem.poll()` from `loop()` to drain URCs.
 
@@ -78,6 +81,7 @@ Two more specialist adapters sit alongside the socket layer:
 
 - **`ST87M01HTTP`** — HTTP and HTTPS client built on the modem's native `AT#HTTP*` command family. Use this for HTTP instead of raw TCP via `ST87M01Client` — the modem delivers HTTP responses in discrete chunks via `AT#HTTPREAD`, so arbitrary response sizes work. For HTTPS, pass a TLS profile id (provisioned via `ST87M01TLS`) as the third arg to `begin()`.
 - **`ST87M01TLS`** — TLS profile / credential provisioning. Wraps `AT#TLSCERT*` and `AT#TLSKEY*` to upload CA root certs, client certificates, and ECC P-256 private keys into the modem's secure storage. The resulting profile id is what `ST87M01HTTP::begin()` consumes for HTTPS. Supports server-authenticated TLS and mutual TLS (mTLS).
+- **`ST87M01MQTT`** — MQTT client built on the modem's native `AT#MQTT*` command family. PubSubClient-compatible API (setServer / setCallback / connect / publish / subscribe / loop). The modem handles MQTT protocol, QoS, and keep-alive internally. Supports QoS 0/1/2. For MQTTS, provision a TLS profile via `ST87M01TLS` and call `setSecurityProfile()`. **50-character topic and payload limit** — for larger payloads, use PubSubClient with `ST87M01Client` instead.
 - **`ST87M01NBIoT`** — NB-IoT-specific extras: PSM, eDRX, sleep mode, wake-up-event configuration, cell/signal/operator info, IMSI, ping.
 
 ## Which class for what
@@ -90,7 +94,10 @@ Two more specialist adapters sit alongside the socket layer:
 | HTTP GET/POST of arbitrary size | `ST87M01HTTP` |
 | HTTPS (server-auth TLS 1.2) | `ST87M01TLS` (provision CA) + `ST87M01HTTP` (`begin(host, 443, profileId)`) |
 | HTTPS with mutual TLS (mTLS) | `ST87M01TLS` (CA + private key + client cert) + `ST87M01HTTP` |
-| MQTT / NTP / any `Client`-based library | `ST87M01Client` / `ST87M01UDP` |
+| MQTT (topics + payloads ≤ 50 chars) | `ST87M01MQTT` (native modem MQTT, QoS 0/1/2) |
+| MQTT (larger payloads) | PubSubClient + `ST87M01Client` (standard TCP, no size limit) |
+| MQTTS (TLS-encrypted MQTT) | `ST87M01TLS` + `ST87M01MQTT::setSecurityProfile()` |
+| NTP / any `Client`-based library | `ST87M01Client` / `ST87M01UDP` |
 | Register on the network and monitor signal | `ST87M01Modem::getCellInfo()` / `getSignal()` + `ST87M01NBIoT` |
 | PSM / eDRX / deep sleep / low-power wake | `ST87M01NBIoT` |
 
@@ -167,6 +174,51 @@ Storage limits: up to 9 security profiles (ids 1-9), each holding a CA cert, opt
 
 See [`examples/HttpsGet`](examples/HttpsGet) for the full flow.
 
+## MQTT
+
+`ST87M01MQTT` wraps the modem's native `AT#MQTT*` command family. The API mirrors [PubSubClient](https://github.com/knolleary/pubsubclient) where possible so sketches can be ported with minimal changes.
+
+```cpp
+#include <ST87M01MQTT.h>
+
+ST87M01MQTT mqtt(modem);
+
+void onMessage(const char* topic, const uint8_t* payload, unsigned int len) {
+  // PubSubClient-compatible callback signature
+}
+
+mqtt.setServer("broker.example.com", 1883);
+mqtt.setCallback(onMessage);
+mqtt.connect("my-device-id");
+mqtt.subscribe("cmd/device1", 1);
+mqtt.publish("data/device1", "23.5");
+
+// In loop():
+mqtt.loop();
+```
+
+Key differences from PubSubClient:
+- Constructor takes `ST87M01Modem&`, not `Client&` — the modem handles MQTT natively.
+- Full QoS 0/1/2 support (PubSubClient only supports QoS 0 publish).
+- `setSecurityProfile()` enables MQTTS using a profile provisioned via `ST87M01TLS`.
+
+**50-character limit**: The modem firmware limits topics AND payloads to 50 characters each. This is fine for sensor telemetry (`"23.5"`, `'{"t":25.3,"h":60}'`) but too small for rich JSON. For larger payloads, use PubSubClient with `ST87M01Client` (our Arduino `Client` implementation) instead — it runs MQTT over raw TCP with no payload size limit.
+
+For MQTTS (TLS-encrypted MQTT on port 8883):
+
+```cpp
+ST87M01TLS tls(modem);
+tls.addCaCertPem(1, brokerCaPem);
+tls.saveToNvm();
+
+ST87M01MQTT mqtt(modem);
+mqtt.setServer("broker.example.com", 8883);
+mqtt.setSecurityProfile(1);
+mqtt.connect("my-device-id");
+```
+
+See [`examples/MqttPublish`](examples/MqttPublish) for the full flow.
+
 ## Low-power: PSM, eDRX, sleep mode
 
 `ST87M01NBIoT` provides a friendly API for the low-power features. For PSM:
@@ -205,6 +257,7 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **HttpsGet** — HTTPS GET. Provisions Amazon Root CA 3 (ECDSA P-256) into a TLS profile then opens a secure session to Amazon's `valid.rootca3.demo.amazontrust.com` via `ST87M01TLS` + `ST87M01HTTP::begin(host, 443, profileId)`.
 - **MtlsGet** — mutual TLS (mTLS). Provisions a CA cert, ECC P-256 client private key, and client certificate into a profile, then performs an HTTPS GET with client authentication. Hardware-validated end-to-end against a Python mTLS server with `CERT_REQUIRED`. Template sketch — replace the placeholder certs/key with your own.
 - **MtlsProvisionTest** — exercises the full mTLS provisioning flow (CA cert → private key → client cert → list → cleanup) without needing a server. Uses embedded test credentials to validate the modem's `AT#TLSKEYADD` and `AT#TLSCERTADD` acceptance on hardware.
+- **MqttPublish** — MQTT publish + subscribe via the modem's native `AT#MQTT*` commands. Connects to `broker.hivemq.com:1883`, subscribes to a command topic, publishes a counter every 30 seconds. Demonstrates the PubSubClient-compatible API and auto-reconnect.
 - **PsmSleep** — negotiate PSM with the network, read requested vs. granted timers, optionally enable sleep URCs.
 - **LowPowerLoop** — UDP/NTP heartbeat with both modem PSM and RP2350 light-sleep; demonstrates the `RP2350Power` + `ST87M01NBIoT` coordination pattern with timer + ring-pin wake.
 
@@ -217,7 +270,7 @@ Located in [`examples/`](examples), in rough order of complexity:
 - **Stale PSM state.** `AT+CPSMS` settings are saved to NVM via `AT#RESET=1`. A modem that boots already in PSM mode can misbehave during the first attach — `nbiot.resetPSM()` early in setup clears the stored values. The `PsmSleep` example does this automatically.
 - **`AT#SLEEPIND` and `AT#SLEEPMODE` settings persist only after `AT#RESET=1`.** The `modem.softReset()` helper takes care of the reset and re-probe; the library does not call it automatically.
 - **Only one in-flight AT transaction.** `ST87M01Modem`, `ST87M01Network`, `ST87M01Client`, `ST87M01UDP`, `ST87M01NBIoT`, and `ST87M01HTTP` all share the same AT channel. Do not issue AT commands from a URC handler.
-- **URC-handler budget: 8.** `ST87M01Modem::begin` registers 3 (CEREG, IPRECV, SOCKETCLOSED). `ST87M01HTTP` registers 2 if instantiated; `ST87M01NBIoT` registers 3. All four stacks together = the full 8. HTTPS reuses the same `#HTTPRECV` / `#HTTPDISC` handlers — `ST87M01TLS` registers no URCs of its own.
+- **URC-handler budget: 12.** `ST87M01Modem::begin` registers 3 (CEREG, IPRECV, SOCKETCLOSED). `ST87M01HTTP` registers 2 if instantiated; `ST87M01NBIoT` registers 3; `ST87M01MQTT` registers 2 (MQTRECV, MQTTDISC). All stacks together = 10 of 12 slots. `ST87M01TLS` registers no URCs of its own.
 - **TLS credentials are RAM-only by default.** `AT#TLSCERTADD` and `AT#TLSKEYADD` take effect immediately but don't persist across power cycle until `AT#RESET=1`. Call `ST87M01TLS::saveToNvm()` once after provisioning; the modem reboots and you'll need to re-attach.
 
 ## Reference

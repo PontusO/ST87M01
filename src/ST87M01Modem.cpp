@@ -16,6 +16,7 @@ bool ST87M01Modem::begin(unsigned long) {
   _at.registerUrcHandler("+CEREG:", &ST87M01Modem::onCeregUrc, this);
   _at.registerUrcHandler("#IPRECV:", &ST87M01Modem::onIpRecvUrc, this);
   _at.registerUrcHandler("#SOCKETCLOSED:", &ST87M01Modem::onSocketClosedUrc, this);
+  _at.setPreSendHook(&ST87M01Modem::preSendHook, this);
 
   if (!isAlive()) {
     if (_pins.reset < 0 || !reset()) return false;
@@ -368,25 +369,31 @@ bool ST87M01Modem::ping(uint8_t cid, const char* hostOrIp) {
 }
 
 bool ST87M01Modem::createSocket(uint8_t cid, bool tcp, uint8_t& socketId,
-                                uint16_t localPort, uint8_t secProfile) {
+                                uint16_t localPort, uint8_t secProfile,
+                                uint8_t frameRecvUrc) {
   String line;
   // ip_version=0 (IPv4), type="TCP"/"UDP", local_port (empty = random),
-  // send_timeout=10s, receive_timeout=10s, frame_received_urc=2 (fires #IPRECV with length).
+  // send_timeout=10s, receive_timeout=10s.
+  // frameRecvUrc: 2 = fires #IPRECV with length (for Client/UDP),
+  //               0 = disabled (for MQTT which uses its own #MQTRECV URC).
   // 8th parameter <security_profile_id> is omitted for plain sockets so the
   // AT line stays byte-identical to the pre-TLS behavior.
   if (secProfile) {
     if (localPort) {
-      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,2,%u",
-                cid, tcp ? "TCP" : "UDP", localPort, secProfile);
+      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,%u,%u",
+                cid, tcp ? "TCP" : "UDP", localPort, frameRecvUrc, secProfile);
     } else {
-      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,2,%u",
-                cid, tcp ? "TCP" : "UDP", secProfile);
+      _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,%u,%u",
+                cid, tcp ? "TCP" : "UDP", frameRecvUrc, secProfile);
     }
   } else if (localPort) {
-    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,2",
-              cid, tcp ? "TCP" : "UDP", localPort);
+    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",%u,10,10,%u",
+              cid, tcp ? "TCP" : "UDP", localPort, frameRecvUrc);
+  } else if (frameRecvUrc) {
+    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,%u",
+              cid, tcp ? "TCP" : "UDP", frameRecvUrc);
   } else {
-    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10,2",
+    _at.sendf("AT#SOCKETCREATE=%u,0,\"%s\",,10,10",
               cid, tcp ? "TCP" : "UDP");
   }
   if (!_at.waitLineStartsWith("#SOCKETCREATE:", line, 5000)) return false;
@@ -620,4 +627,31 @@ bool ST87M01Modem::isIpLiteral(const char* s) const {
     }
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// AT pre-send hook — silent-sleep workaround
+// ---------------------------------------------------------------------------
+// The modem can sleep silently — empirically the first AT command after an
+// idle period is lost (no response at all), the second responds normally.
+// `#SLEEP` / `#WAKEUP` URCs are not reliable: sometimes delayed by 7-15 s
+// past the actual sleep transition, sometimes not emitted at all. We don't
+// trust them. Instead, the pre-send hook unconditionally probes the modem
+// with two AT commands before every real command. The first AT is the
+// wake trigger and is reliably lost when the modem is asleep; the second
+// AT lands on a now-responsive modem. Cheap (~100 ms) when already awake.
+//
+// The hook is invoked from inside ST87M01AT::send()/beginCommand() and is
+// re-entrancy-guarded by the AT layer, so the probe AT inside the hook
+// does not recurse.
+
+void ST87M01Modem::preSendHook(void* ctx) {
+  static_cast<ST87M01Modem*>(ctx)->wakeModem();
+}
+
+void ST87M01Modem::wakeModem() {
+  _at.sendf("AT");
+  if (_at.expectOK(500)) return;
+  _at.sendf("AT");
+  _at.expectOK(10000);
 }

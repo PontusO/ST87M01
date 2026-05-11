@@ -54,6 +54,14 @@ public:
   typedef void (*UrcHandler)(const String& line, void* ctx);
   bool registerUrcHandler(const char* prefix, UrcHandler cb, void* ctx);
 
+  // Pre-send hook fired before every send()/beginCommand(). The modem layer
+  // sets this to a function that drains pending URCs (so the sleep flag is
+  // current) and, if the modem is sleeping, performs the wake sequence
+  // before the real command is written. Recursion is guarded internally —
+  // the hook may safely re-enter send() to issue probe commands like AT.
+  typedef void (*PreSendHook)(void* ctx);
+  void setPreSendHook(PreSendHook hook, void* ctx) { _preSendHook = hook; _preSendCtx = ctx; }
+
   // Tee every line read from the modem and every command sent to the modem
   // into the given stream for debugging. Pass nullptr to disable. Very noisy;
   // normally only used to diagnose why a specific AT exchange is misbehaving.
@@ -61,7 +69,7 @@ public:
   Stream* debugStream() const { return _debug; }
 
 private:
-  static constexpr size_t MAX_URC_HANDLERS = 8;
+  static constexpr size_t MAX_URC_HANDLERS = 12;
 
   struct Handler {
     String prefix;
@@ -75,6 +83,11 @@ private:
   int _lastCmeError;
   String _rxLine;
   Handler _handlers[MAX_URC_HANDLERS];
+  PreSendHook _preSendHook = nullptr;
+  void* _preSendCtx = nullptr;
+  bool _inPreSend = false;
+
+  void runPreSendHook();
 
   bool readRawLine(String& line, unsigned long timeoutMs);
   void dispatchIfUrc(const String& line);

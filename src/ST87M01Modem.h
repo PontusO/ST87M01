@@ -61,8 +61,11 @@ public:
   // Creates a socket. `secProfile` selects a TLS security profile (1-9) that
   // must already be provisioned via ST87M01TLS; 0 means a plain (unsecured)
   // socket and is byte-identical on the AT wire to the pre-TLS behavior.
+  // `frameRecvUrc` controls the #IPRECV URC: 2 = enabled (default, needed for
+  // ST87M01Client/UDP), 0 = disabled (needed for MQTT which uses #MQTRECV).
   bool createSocket(uint8_t cid, bool tcp, uint8_t& socketId,
-                    uint16_t localPort = 0, uint8_t secProfile = 0);
+                    uint16_t localPort = 0, uint8_t secProfile = 0,
+                    uint8_t frameRecvUrc = 2);
   bool connectTcp(uint8_t cid, uint8_t socketId, const char* ip, uint16_t port);
   bool sendTcp(uint8_t cid, uint8_t socketId, const uint8_t* data, size_t len);
   bool sendUdp(uint8_t cid, uint8_t socketId, const char* ip, uint16_t port,
@@ -102,6 +105,8 @@ private:
   static void onCeregUrc(const String& line, void* ctx);
   static void onIpRecvUrc(const String& line, void* ctx);
   static void onSocketClosedUrc(const String& line, void* ctx);
+  static void preSendHook(void* ctx);
+  void wakeModem();
   void parseCereg(const String& line, ST87M01CellInfo& cell, bool isReadResponse);
 
   bool runSimple(const char* cmd, unsigned long timeoutMs = 2000);

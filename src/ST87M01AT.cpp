@@ -26,6 +26,7 @@ void ST87M01AT::poll() {
 }
 
 bool ST87M01AT::send(const char* cmd) {
+  runPreSendHook();
   if (_debug) {
     _debug->print(">>> ");
     _debug->println(cmd);
@@ -33,6 +34,13 @@ bool ST87M01AT::send(const char* cmd) {
   _serial.print(cmd);
   _serial.print("\r");
   return true;
+}
+
+void ST87M01AT::runPreSendHook() {
+  if (!_preSendHook || _inPreSend) return;
+  _inPreSend = true;
+  _preSendHook(_preSendCtx);
+  _inPreSend = false;
 }
 
 bool ST87M01AT::sendf(const __FlashStringHelper* fmt, ...) {
@@ -54,6 +62,7 @@ bool ST87M01AT::sendf(const char* fmt, ...) {
 }
 
 void ST87M01AT::beginCommand(const char* prefix) {
+  runPreSendHook();
   if (_debug) {
     _debug->print(">>> ");
     _debug->print(prefix);
